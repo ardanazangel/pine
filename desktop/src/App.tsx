@@ -2,22 +2,25 @@
 // conversation in the middle with its panel, and whatever lies over them for a moment (a list
 // to pick from, a question, the palette).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type AgentInfo, api, type Approval, type Conversation as Conv } from "./api.ts";
+import { type AgentInfo, apiFor, type Approval, type Conversation as Conv } from "./api.ts";
 import { bridge } from "./bridge.ts";
 import { CodePanel } from "./CodePanel.tsx";
 import { COMMANDS } from "./commands.ts";
 import { Conversation } from "./Conversation.tsx";
 import { Events } from "./Events.tsx";
-import { type Picker, store, type Tab, useModel, useSignal } from "./model.ts";
+import { type Env, type Picker, store, type Tab, useModel, useSignal } from "./model.ts";
 import { Settings } from "./Settings.tsx";
 import { ago, fuzzy, until } from "./text.ts";
 import { Button, Confirm, Dialog, Icon, Logo, Pulse } from "./ui.tsx";
 
 // ---- before pine answers -----------------------------------------------------------------------------
 
+/** Until one pine answers: each environment that is on, and how far it got. */
 function Gate() {
 	const s = useModel(store);
-	const state = s.service;
+	const envs = s.shown;
+	const local = envs.find((e) => e.id === "local");
+	const state = local?.service;
 	const init = async () => {
 		s.initRunning = true;
 		s.initLines = [];
@@ -25,42 +28,54 @@ function Gate() {
 		const code = await bridge.init().catch(() => 1);
 		s.initRunning = false;
 		s.touch();
-		if (code === 0) await bridge.retry();
+		if (code === 0) await bridge.retry("local");
 		else s.flash("pine init did not finish. What it said is shown above.", "bad");
 	};
 	return (
 		<div className="gate">
 			<div className="gate-in">
 				<Logo size={36} />
-				{state.status === "starting" ? (
-					<>
-						<h1>Starting pine</h1>
-						<p className="row"><Pulse /> Looking for a running pine, or starting one…</p>
-					</>
-				) : state.status === "error" && state.kind === "no-home" ? (
+				{state?.status === "error" && state.kind === "no-home" ? (
 					<>
 						<h1>Welcome to pine</h1>
 						<p>pine keeps its agents, their workspaces and its settings in a home folder ({s.prefs.home ?? s.home ?? "~/.pine"}). There is none yet. Setting it up copies the example home and fetches the browser its web tools drive (about 600 MB, once).</p>
 						{s.initLines.length ? <pre className="log" style={{ width: "100%" }}>{s.initLines.slice(-40).join("\n")}</pre> : null}
 						<div className="row">
 							<Button variant="primary" disabled={s.initRunning} onClick={() => void init()}>{s.initRunning ? <><Pulse size={12} /> Setting up…</> : "Set up pine"}</Button>
-							<Button disabled={s.initRunning} onClick={() => void bridge.retry()}>Try again</Button>
-						</div>
-					</>
-				) : state.status === "error" ? (
-					<>
-						<h1>{state.kind === "no-node" ? "pine needs Node" : state.kind === "no-pine" ? "pine is not installed" : "pine did not start"}</h1>
-						<p>{state.message}</p>
-						<div className="row">
-							<Button variant="primary" onClick={() => void bridge.retry()}>Try again</Button>
-							{state.kind === "no-node" ? <Button onClick={() => void bridge.open("https://nodejs.org")}>nodejs.org</Button> : null}
+							<Button disabled={s.initRunning} onClick={() => void bridge.retry("local")}>Try again</Button>
 						</div>
 					</>
 				) : (
-					<p className="row"><Pulse /> Loading your agents…</p>
+					<>
+						{envs.some((e) => e.service.status === "error") ? null : <h1>Starting pine</h1>}
+						{envs.map((e) => <GateLine key={e.id} e={e} />)}
+					</>
 				)}
 			</div>
 		</div>
+	);
+}
+
+function GateLine({ e }: { e: Env }) {
+	const s = store;
+	const state = e.service;
+	// Another machine that is not reached, and this computer is off: it can be the one instead.
+	const instead = async () => {
+		await bridge.enableEnvironment("local", true);
+		await bridge.enableEnvironment(e.id, false);
+	};
+	if (state.status === "starting") return <p className="row"><Pulse /> {e.host ? `Connecting to the pine on ${e.label} over SSH…` : "Looking for a running pine, or starting one…"}</p>;
+	if (state.status === "ready") return <p className="row"><Pulse /> Loading the agents{s.on(e.id)}…</p>;
+	return (
+		<>
+			<h1>{state.kind === "no-node" ? "pine needs Node" : state.kind === "no-pine" ? "pine is not installed" : state.kind === "ssh" ? `pine on ${e.label} is not reached over SSH` : e.host ? `pine on ${e.label} did not start` : "pine did not start"}</h1>
+			<p>{state.message}</p>
+			<div className="row">
+				<Button variant="primary" onClick={() => void bridge.retry(e.id)}>Try again</Button>
+				{state.kind === "no-node" ? <Button onClick={() => void bridge.open("https://nodejs.org")}>nodejs.org</Button> : null}
+				{e.host && !s.env("local")?.enabled ? <Button onClick={() => void instead()}>Use this Mac</Button> : null}
+			</div>
+		</>
 	);
 }
 
@@ -69,9 +84,9 @@ function Gate() {
 // under it its conversations. What starts something new stands on the agent's own line, so it
 // is never a question whom a new conversation or a folder is for.
 
-function ConversationRow({ agent, c, depth = 0 }: { agent: string; c: Conv; depth?: number }) {
+function ConversationRow({ env, agent, c, depth = 0 }: { env: string; agent: string; c: Conv; depth?: number }) {
 	const s = store;
-	const tab = s.tabs.find((t) => t.kind === "chat" && t.agent === agent && t.session === c.session);
+	const tab = s.tabs.find((t) => t.kind === "chat" && t.env === env && t.agent === agent && t.session === c.session);
 	const main = c.session === "main";
 	const menu = async () => {
 		const picked = await bridge.contextMenu([
@@ -83,39 +98,39 @@ function ConversationRow({ agent, c, depth = 0 }: { agent: string; c: Conv; dept
 			{ id: "sep", label: "", separator: true },
 			main ? { id: "reset", label: "Start over…" } : { id: "remove", label: "Remove…" },
 		]);
-		if (picked === "open") await s.openTab(agent, c.session);
-		if (picked === "branch" || picked === "branch-worktree") await s.branch(agent, c.session, undefined, picked === "branch-worktree");
+		if (picked === "open") await s.openTab(env, agent, c.session);
+		if (picked === "branch" || picked === "branch-worktree") await s.branch(env, agent, c.session, undefined, picked === "branch-worktree");
 		if (picked === "worktree") {
-			await s.openTab(agent, c.session);
+			await s.openTab(env, agent, c.session);
 			if (s.active?.kind === "chat") await s.worktreeMenu(s.active);
 		}
 		if (picked === "pin") {
-			await s.attempt(() => api.pinSession(agent, c.session, !c.pinned));
-			await s.refreshConversations(agent);
+			await s.attempt(() => apiFor(env).pinSession(agent, c.session, !c.pinned));
+			await s.refreshConversations(s.env(env), agent);
 		}
 		if (picked === "rename") {
 			const to = await s.pick({ title: `Another name for ${c.session}`, items: [], free: true, placeholder: "The new name" });
-			if (to?.trim()) await s.rename(agent, c.session, to.trim());
+			if (to?.trim()) await s.rename(env, agent, c.session, to.trim());
 		}
 		if (picked === "remove") {
-			const sure = await s.pick({ title: `Remove the conversation ${c.session} of ${agent}?`, items: [{ value: "yes", label: "Remove it for good", about: "Its history, what it may do without asking, what it listens to and whatever was set up for it alone all go.", tone: "bad" }, { value: "no", label: "Cancel" }] });
-			if (sure === "yes") await s.removeConversation(agent, c.session);
+			const sure = await s.pick({ title: `Remove the conversation ${c.session} of ${agent}${s.on(env)}?`, items: [{ value: "yes", label: "Remove it for good", about: "Its history, what it may do without asking, what it listens to and whatever was set up for it alone all go.", tone: "bad" }, { value: "no", label: "Cancel" }] });
+			if (sure === "yes") await s.removeConversation(env, agent, c.session);
 		}
 		if (picked === "reset") {
-			await s.openTab(agent, c.session);
+			await s.openTab(env, agent, c.session);
 			if (s.active) await s.reset(s.active);
 		}
 	};
 	const kept = main ? "the agent's own, always kept" : c.pinned ? "pinned" : c.open ? "open in a tab" : c.expires ? `goes ${until(c.expires)}` : "kept";
-	const working = tab?.busy || s.isBusy(agent, c.session);
+	const working = tab?.busy || s.isBusy(env, agent, c.session);
 	return (
-		<div className={`side-row side-conv${tab && tab === s.active ? " on" : ""}`} style={depth ? { paddingLeft: 31 + 14 * Math.min(depth, 4) } : undefined} onClick={() => void s.openTab(agent, c.session)} onContextMenu={(e) => (e.preventDefault(), void menu())} title={`${agent} · ${c.session} · ${kept}${c.branch ? ` · a branch of ${c.branch.from}` : ""}${c.worktree ? ` · in the worktree ${c.worktree.branch} of ${c.worktree.repo}` : c.folder ? ` · works in ${c.folder}` : ""}`}>
+		<div className={`side-row side-conv${tab && tab === s.active ? " on" : ""}`} style={depth ? { paddingLeft: 31 + 14 * Math.min(depth, 4) } : undefined} onClick={() => void s.openTab(env, agent, c.session)} onContextMenu={(e) => (e.preventDefault(), void menu())} title={`${agent}${s.on(env)} · ${c.session} · ${kept}${c.branch ? ` · a branch of ${c.branch.from}` : ""}${c.worktree ? ` · in the worktree ${c.worktree.branch} of ${c.worktree.repo}` : c.folder ? ` · works in ${c.folder}` : ""}`}>
 			<span className="lead">{tab?.approvals.size ? <span className="needs">!</span> : working ? <Pulse size={11} /> : tab?.unread ? <span className="dot unread" /> : main || c.pinned ? <Icon name="star" size={12} className="faint" /> : depth || c.worktree ? <Icon name="branch" size={12} className="faint" /> : c.folder ? <Icon name="folder" size={12} className="faint" /> : <Icon name="chat" size={12} className="faint" />}</span>
-			<span className="cut grow">{s.titleOf(agent, c.session)}</span>
+			<span className="cut grow">{s.titleOf(env, agent, c.session)}</span>
 			<span className="when">{c.tasks ? ago(c.last).replace(" ago", "") : ""}</span>
 			{main ? null : (
 				<span className="acts" onClick={(e) => e.stopPropagation()}>
-					<Confirm icon="trash" label="Remove this conversation for good" sure="Remove?" onConfirm={() => void s.removeConversation(agent, c.session)} />
+					<Confirm icon="trash" label="Remove this conversation for good" sure="Remove?" onConfirm={() => void s.removeConversation(env, agent, c.session)} />
 				</span>
 			)}
 		</div>
@@ -141,22 +156,23 @@ function threaded(rows: Conv[]): Array<{ c: Conv; depth: number }> {
 	return out;
 }
 
-function AgentGroup({ a }: { a: AgentInfo }) {
+function AgentGroup({ env, a }: { env: Env; a: AgentInfo }) {
 	const s = store;
-	const folded = s.folded.has(a.id);
-	const list = s.conversations.get(a.id) ?? [];
+	const folded = s.isFolded(env.id, a.id);
+	const list = env.conversations.get(a.id) ?? [];
+	const who = { env: env.id, agent: a.id };
 	// The agent's own conversation first, then what is pinned, then by when it was last used.
 	const sorted = [...list].sort((x, y) => Number(y.session === "main") - Number(x.session === "main") || Number(y.pinned) - Number(x.pinned) || y.last - x.last);
 	const rows = sorted.some((c) => c.session === "main") ? sorted : [{ session: "main", tasks: 0, last: 0, pinned: false, open: false }, ...sorted];
 	// A conversation that is open in a tab and has not been said anything in yet is not in the daemon's list.
-	for (const t of s.tabs) if (t.kind === "chat" && t.agent === a.id && !rows.some((c) => c.session === t.session)) rows.push({ session: t.session, tasks: 0, last: Date.now(), pinned: false, open: true });
-	const tabs = s.tabs.filter((t) => t.agent === a.id && t.kind === "chat");
+	const tabs = s.tabsOf(env.id).filter((t) => t.agent === a.id && t.kind === "chat");
+	for (const t of tabs) if (!rows.some((c) => c.session === t.session)) rows.push({ session: t.session, tasks: 0, last: Date.now(), pinned: false, open: true });
 	const waits = tabs.some((t) => t.approvals.size > 0);
-	const working = s.isBusy(a.id) || tabs.some((t) => t.busy);
+	const working = s.isBusy(env.id, a.id) || tabs.some((t) => t.busy);
 	const unread = tabs.some((t) => t.unread);
 	const pickFolder = async () => {
-		const dir = await bridge.pickFolder(`A folder for a conversation with ${a.id}`);
-		if (dir) await s.openFolder(dir, a.id);
+		const dir = await s.chooseFolder(env.id, `A folder for a conversation with ${a.id}`);
+		if (dir) await s.openFolder(dir, who);
 	};
 	const menu = async () => {
 		const picked = await bridge.contextMenu([
@@ -167,14 +183,14 @@ function AgentGroup({ a }: { a: AgentInfo }) {
 			// The main agent administers pine and stays.
 			...(a.main ? [] : [{ id: "sep2", label: "", separator: true }, { id: "remove", label: `Remove ${a.id}…` }]),
 		]);
-		if (picked === "new") await s.newConversation(a.id);
+		if (picked === "new") await s.newConversation(who);
 		if (picked === "folder") await pickFolder();
-		if (picked === "settings") s.openSettings("agents", a.id);
-		if (picked === "remove") await s.removeAgent(a.id);
+		if (picked === "settings") s.openSettings("agents", a.id, env.id);
+		if (picked === "remove") await s.removeAgent(env.id, a.id);
 	};
 	return (
 		<div className="side-group">
-			<div className="side-agent" title={`${a.id}: ${a.description || "no description"}\n${a.model} · ${a.mode}`} onClick={() => s.toggleFold(a.id)} onContextMenu={(e) => (e.preventDefault(), void menu())}>
+			<div className="side-agent" title={`${a.id}${s.on(env.id)}: ${a.description || "no description"}\n${a.model} · ${a.mode}`} onClick={() => s.toggleFold(env.id, a.id)} onContextMenu={(e) => (e.preventDefault(), void menu())}>
 				<Icon name={folded ? "right" : "down"} size={10} className="faint" />
 				<span className="avatar">{a.id.slice(0, 1).toUpperCase()}</span>
 				<span className="who">
@@ -183,23 +199,55 @@ function AgentGroup({ a }: { a: AgentInfo }) {
 				</span>
 				{waits ? <span className="needs">!</span> : working ? <Pulse size={11} /> : unread && folded ? <span className="dot unread" /> : null}
 				<span className="agent-acts" onClick={(e) => e.stopPropagation()}>
-					<Button small variant="ghost" icon="gear" title={`Settings of ${a.id}`} onClick={() => s.openSettings("agents", a.id)} />
+					<Button small variant="ghost" icon="gear" title={`Settings of ${a.id}`} onClick={() => s.openSettings("agents", a.id, env.id)} />
 					<Button small variant="ghost" icon="folder" title={`Open a folder for a conversation with ${a.id}`} onClick={() => void pickFolder()} />
 				</span>
 				<span onClick={(e) => e.stopPropagation()}>
-					<Button small variant="ghost" icon="plus" title={`New conversation with ${a.id}`} onClick={() => void s.newConversation(a.id)} />
+					<Button small variant="ghost" icon="plus" title={`New conversation with ${a.id}`} onClick={() => void s.newConversation(who)} />
 				</span>
 			</div>
-			{folded ? null : threaded(rows).map(({ c, depth }) => <ConversationRow key={c.session} agent={a.id} c={c} depth={depth} />)}
+			{folded ? null : threaded(rows).map(({ c, depth }) => <ConversationRow key={c.session} env={env.id} agent={a.id} c={c} depth={depth} />)}
+		</div>
+	);
+}
+
+/** One environment in the side bar: its name and how its pine is, then its agents. */
+function EnvSection({ env }: { env: Env }) {
+	const s = store;
+	const state = env.service;
+	const status = state.status === "error" ? "error" : state.status === "starting" ? "connecting" : !env.connected ? "reconnecting" : "connected";
+	const about = env.id === "local" ? "Agents of the pine on this computer" : `Agents of the pine on ${env.host}, over SSH`;
+	const how = state.status === "ready" ? `pine${state.version ? ` ${state.version}` : ""} · ${state.remote ? state.mode : state.started ? "started here" : "attached"}` : "";
+	return (
+		<div className="side-env" data-environment={env.id} data-status={status}>
+			<div className="side-label" title={`${about}${how ? `\n${how}` : ""} · ${status}`}>
+				<Icon name={env.id === "local" ? "cpu" : "terminal"} size={12} />&nbsp;<span className="cut">{env.label}</span>
+				{status === "connected" ? null : <span className={`dot ${status === "error" ? "bad" : "warn"}`} style={{ marginLeft: 6 }} />}
+				<span className="grow" />
+				{env.ready ? <Button small variant="ghost" icon="plus" title={`New agent${s.on(env.id)}`} onClick={() => s.openSettings("agents", "+", env.id)} /> : null}
+			</div>
+			{state.status === "error" ? (
+				<div className="side-env-note bad" title={state.message}>
+					<span className="cut grow">{state.kind === "ssh" ? "Not reached over SSH" : state.kind === "no-home" ? "No pine home yet" : "Did not start"}</span>
+					<Button small onClick={() => void bridge.retry(env.id)}>Try again</Button>
+				</div>
+			) : status === "connecting" ? (
+				<div className="side-env-note"><Pulse size={11} /><span className="cut grow">{env.host ? "Connecting over SSH…" : "Starting pine…"}</span></div>
+			) : status === "reconnecting" ? (
+				<div className="side-env-note"><Pulse size={11} /><span className="cut grow">Reconnecting…</span></div>
+			) : null}
+			{env.agents.map((a) => <AgentGroup key={a.id} env={env} a={a} />)}
 		</div>
 	);
 }
 
 function Sidebar() {
 	const s = useModel(store);
-	const ready = s.service.status === "ready";
 	const front = s.active;
 	const newer = s.update?.status === "newer" ? s.update : undefined;
+	const envs = s.shown;
+	const one = envs.length === 1 ? envs[0] : undefined;
+	const state = one?.service;
 	return (
 		<aside className="sidebar">
 			<div className="side-top">
@@ -207,17 +255,23 @@ function Sidebar() {
 			</div>
 			<div className="side-scroll">
 				<div className="side-row" onClick={() => void s.command("palette")} title="Find a conversation by its name or by what was said in it, or a command, an agent, a settings page"><Icon name="search" size={14} /><span className="grow">Search</span><kbd>⌘K</kbd></div>
-				<div className="side-label">Agents<span className="grow" /><Button small variant="ghost" icon="plus" title="New agent" onClick={() => s.openSettings("agents", "+")} /></div>
-				{s.agents.map((a) => <AgentGroup key={a.id} a={a} />)}
+				{envs.map((env) => <EnvSection key={env.id} env={env} />)}
 			</div>
 			<div className="side-foot">
 				{newer ? <div className="side-row side-update" onClick={() => void bridge.open(newer.url)} title={`This is Pine ${newer.mine}. Opens the release's page on GitHub in your browser: download the disk image there and put the app in place of this one.`}><Icon name="up" size={14} /><span className="grow cut">Pine {newer.version} is available</span><Icon name="external" size={12} /></div> : null}
 				<div className={`side-row${front?.kind === "events" ? " on" : ""}`} onClick={() => void s.openEvents()}><Icon name="wave" size={14} /><span className="grow">Events</span></div>
 				<div className={`side-row${front?.kind === "settings" ? " on" : ""}`} onClick={() => s.openSettings()}><Icon name="gear" size={14} /><span className="grow">Settings</span><kbd>⌘,</kbd></div>
-				<div className="side-status" title={s.service.status === "ready" ? `${s.service.home} · ${s.service.started ? "started by this app" : "a pine that was already running"}` : ""}>
-					<span className={`dot ${!ready ? "warn" : s.connected ? "good" : "bad"}`} />
-					<span className="cut">{!ready ? "starting" : !s.connected ? "pine does not answer" : `pine${s.service.status === "ready" && s.service.version ? ` ${s.service.version}` : ""} · ${s.service.status === "ready" && s.service.started ? "started here" : "attached"}`}</span>
-				</div>
+				{one ? (
+					<div className="side-status" title={state?.status === "ready" ? `${state.home} · ${state.remote ? `over SSH (${state.from})` : state.started ? "started by this app" : "a pine that was already running"}` : ""}>
+						<span className={`dot ${state?.status !== "ready" ? "warn" : one.connected ? "good" : "bad"}`} />
+						<span className="cut">{state?.status !== "ready" ? "starting" : !one.connected ? "pine does not answer" : `pine${state.version ? ` ${state.version}` : ""} · ${state.remote ? state.mode : state.started ? "started here" : "attached"}`}</span>
+					</div>
+				) : (
+					<div className="side-status" title="Each environment says beside its name when its pine does not answer" onClick={() => s.openSettings("environments")}>
+						<span className={`dot ${envs.every((e) => e.ready && e.connected) ? "good" : envs.some((e) => e.ready && e.connected) ? "warn" : "bad"}`} />
+						<span className="cut">{envs.filter((e) => e.ready && e.connected).length} of {envs.length} environments connected</span>
+					</div>
+				)}
 			</div>
 		</aside>
 	);
@@ -230,7 +284,9 @@ function TabButton({ tab, index }: { tab: Tab; index: number }) {
 	const s = store;
 	const [drop, setDrop] = useState(false);
 	const on = s.active === tab;
-	const kept = tab.kind === "chat" && (tab.session === "main" || s.pins.has(tab.key));
+	const kept = tab.kind === "chat" && (tab.session === "main" || s.isPinned(tab));
+	// Where several environments are shown, a tab of another machine says which: both can have a "main".
+	const where = tab.env !== "local" && s.shown.length > 1 ? s.env(tab.env)?.label : undefined;
 	return (
 		<div
 			className={`tab${on ? " on" : ""}${drop ? " drop" : ""}`}
@@ -241,13 +297,14 @@ function TabButton({ tab, index }: { tab: Tab; index: number }) {
 			onDrop={(e) => (setDrop(false), s.moveTab(Number(e.dataTransfer.getData("application/x-pine-tab")), index))}
 			onClick={() => s.activate(tab)}
 			onAuxClick={(e) => e.button === 1 && s.closeTab(tab)}
-			title={tab.kind === "chat" ? `${tab.agent} · ${tab.session}${tab.folder ? ` · ${tab.folder}` : ""}` : tab.kind === "task" ? `task #${tab.task}` : tab.kind}
+			title={tab.kind === "chat" ? `${tab.agent}${s.on(tab.env)} · ${tab.session}${tab.folder ? ` · ${tab.folder}` : ""}` : tab.kind === "task" ? `task #${tab.task}${s.on(tab.env)}` : tab.kind === "events" ? `events${s.on(tab.env)}` : tab.kind}
 		>
 			<span className="mark">
 				{tab.approvals.size ? <span className="needs">!</span> : tab.busy ? <Pulse size={11} /> : tab.unread ? <span className="dot unread" /> : tab.kind === "events" ? <Icon name="wave" size={12} /> : tab.kind === "settings" ? <Icon name="gear" size={12} /> : tab.kind === "task" ? <Icon name="list" size={12} /> : <span className="avatar small">{tab.agent.slice(0, 1).toUpperCase()}</span>}
 			</span>
 			<span className="name">
-				{tab.kind === "events" ? "Events" : tab.kind === "settings" ? "Settings" : tab.kind === "task" ? <><b>{tab.agent}</b> #{tab.task}</> : tab.session === "main" ? <b>{tab.agent}</b> : <><b>{tab.agent}</b> · {s.titleOf(tab.agent, tab.session)}</>}
+				{tab.kind === "events" ? "Events" : tab.kind === "settings" ? "Settings" : tab.kind === "task" ? <><b>{tab.agent}</b> #{tab.task}</> : tab.session === "main" ? <b>{tab.agent}</b> : <><b>{tab.agent}</b> · {s.titleOf(tab.env, tab.agent, tab.session)}</>}
+				{where ? <span className="where"> · {where}</span> : null}
 			</span>
 			{kept && tab.session !== "main" ? <Icon name="star" size={10} className="star" /> : null}
 			<span className="close" onClick={(e) => (e.stopPropagation(), s.closeTab(tab))}><Icon name="x" size={11} /></span>
@@ -264,7 +321,7 @@ function TitleBar() {
 			<div className="tabs">
 				{s.tabs.map((t, i) => <TabButton key={t.id} tab={t} index={i} />)}
 			</div>
-			<Button variant="ghost" icon="plus" title={with_ ? `New conversation with ${with_} (⌘T)` : "New conversation (⌘T): you are asked with which agent"} onClick={() => void s.newConversation()} />
+			<Button variant="ghost" icon="plus" title={with_ ? `New conversation with ${with_.agent}${s.on(with_.env)} (⌘T)` : "New conversation (⌘T): you are asked with which agent"} onClick={() => void s.newConversation()} />
 			<span className="grow" />
 		</header>
 	);
@@ -332,18 +389,21 @@ function Palette() {
 	const [at, setAt] = useState(0);
 	const list = useRef<HTMLDivElement>(null);
 	useModel(s);
-	type Row = { id: string; group: string; label: string; about?: string; keys?: string; run: () => void; conv?: { agent: string; session: string } };
+	type Row = { id: string; group: string; label: string; about?: string; keys?: string; run: () => void; conv?: { env: string; agent: string; session: string } };
 	const all = useMemo(() => {
 		const chat = s.active?.kind === "chat";
 		const rows: Row[] = [];
-		for (const t of s.tabs) rows.push({ id: `t:${t.id}`, group: "Open tabs", label: t.kind === "chat" ? `${t.agent} · ${s.titleOf(t.agent, t.session)}` : t.kind === "task" ? `${t.agent} task #${t.task}` : t.kind === "settings" ? "Settings" : "Events", run: () => s.activate(t), conv: t.kind === "chat" ? { agent: t.agent, session: t.session } : undefined });
-		for (const [agent, convs] of s.conversations) for (const c of convs) if (!s.tabs.some((t) => t.kind === "chat" && t.agent === agent && t.session === c.session)) rows.push({ id: `s:${agent}:${c.session}`, group: "Conversations", label: `${agent} · ${s.titleOf(agent, c.session)}`, about: `${ago(c.last)}${c.folder ? ` · ${c.folder}` : ""}`, run: () => void s.openTab(agent, c.session), conv: { agent, session: c.session } });
+		const on = (env: string) => (s.shown.length > 1 ? ` · ${s.env(env)?.label ?? env}` : "");
+		for (const t of s.tabs) rows.push({ id: `t:${t.id}`, group: "Open tabs", label: t.kind === "chat" ? `${t.agent} · ${s.titleOf(t.env, t.agent, t.session)}${on(t.env)}` : t.kind === "task" ? `${t.agent} task #${t.task}${on(t.env)}` : t.kind === "settings" ? "Settings" : `Events${on(t.env)}`, run: () => s.activate(t), conv: t.kind === "chat" ? { env: t.env, agent: t.agent, session: t.session } : undefined });
+		for (const env of s.shown)
+			for (const [agent, convs] of env.conversations)
+				for (const c of convs) if (!s.tabs.some((t) => t.kind === "chat" && t.env === env.id && t.agent === agent && t.session === c.session)) rows.push({ id: `s:${env.id}|${agent}:${c.session}`, group: "Conversations", label: `${agent} · ${s.titleOf(env.id, agent, c.session)}${on(env.id)}`, about: `${ago(c.last)}${c.folder ? ` · ${c.folder}` : ""}`, run: () => void s.openTab(env.id, agent, c.session), conv: { env: env.id, agent, session: c.session } });
 		for (const c of COMMANDS) if (!c.chat || chat) rows.push({ id: `c:${c.name}`, group: "Commands", label: c.title, about: c.about, keys: c.keys, run: () => void c.run("", s.active) });
-		for (const a of s.agents) rows.push({ id: `a:${a.id}`, group: "Agents", label: `New conversation with ${a.id}`, about: a.description, run: () => void s.newConversation(a.id) });
-		for (const [id, label] of [["general", "General"], ["agents", "Agents"], ["models", "Models"], ["mcp", "MCP servers"], ["skills", "Skills"], ["events", "Events"], ["instructions", "Instructions"], ["app", "App"]]) rows.push({ id: `p:${id}`, group: "Settings", label: `Settings: ${label}`, run: () => void s.command(`settings:${id}`) });
+		for (const env of s.shown) for (const a of env.agents) rows.push({ id: `a:${env.id}|${a.id}`, group: "Agents", label: `New conversation with ${a.id}${on(env.id)}`, about: a.description, run: () => void s.newConversation({ env: env.id, agent: a.id }) });
+		for (const [id, label] of [["general", "General"], ["agents", "Agents"], ["models", "Models"], ["mcp", "MCP servers"], ["skills", "Skills"], ["events", "Events"], ["instructions", "Instructions"], ["environments", "Environments"], ["app", "App"]]) rows.push({ id: `p:${id}`, group: "Settings", label: `Settings: ${label}`, run: () => void s.command(`settings:${id}`) });
 		return rows;
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [s.titles]);
+	}, [s.envs.map((e) => e.titles)]);
 	// What fits by its name comes first; then the conversations in which the words were said; then
 	// what only fits by its description, and last what fits by letters in order.
 	const shown = useMemo(() => {
@@ -359,19 +419,20 @@ function Palette() {
 		}
 		// A conversation is listed once. One that fits by its name and also holds the words opens at the words.
 		const found = s.searchSaid(q);
-		const holds = (r: Row) => (r.conv ? found.find((m) => m.agent === r.conv!.agent && m.session === r.conv!.session) : undefined);
+		const holds = (r: Row) => (r.conv ? found.find((m) => m.env === r.conv!.env && m.agent === r.conv!.agent && m.session === r.conv!.session) : undefined);
+		const keyOf = (c: { env: string; agent: string; session: string }) => `${c.env}|${c.agent}:${c.session}`;
 		const listed = new Set<string>();
 		const here = (r: Row): Row => {
 			const m = holds(r);
 			if (!m) return r;
-			listed.add(`${m.agent}:${m.session}`);
-			return { ...r, about: `${m.who}: ${m.snippet}`, keys: ago(m.ts), run: () => void s.openFound(m.agent, m.session, query.trim()) };
+			listed.add(keyOf(m));
+			return { ...r, about: `${m.who}: ${m.snippet}`, keys: ago(m.ts), run: () => void s.openFound(m.env, m.agent, m.session, query.trim()) };
 		};
 		const byName = named.map(here);
-		const said: Row[] = found.filter((m) => !listed.has(`${m.agent}:${m.session}`)).map((m) => ({ id: `m:${m.agent}:${m.session}`, group: "Said in conversations", label: `${m.agent} · ${s.titleOf(m.agent, m.session)}`, about: `${m.who}: ${m.snippet}`, keys: ago(m.ts), run: () => void s.openFound(m.agent, m.session, query.trim()) }));
-		return [...byName, ...said, ...described.filter((r) => !holds(r) || !listed.has(`${r.conv!.agent}:${r.conv!.session}`)), ...loose.filter((r) => !r.conv || !listed.has(`${r.conv.agent}:${r.conv.session}`))].slice(0, 80);
+		const said: Row[] = found.filter((m) => !listed.has(keyOf(m))).map((m) => ({ id: `m:${keyOf(m)}`, group: "Said in conversations", label: `${m.agent} · ${s.titleOf(m.env, m.agent, m.session)}${s.shown.length > 1 ? ` · ${s.env(m.env)?.label ?? m.env}` : ""}`, about: `${m.who}: ${m.snippet}`, keys: ago(m.ts), run: () => void s.openFound(m.env, m.agent, m.session, query.trim()) }));
+		return [...byName, ...said, ...described.filter((r) => !holds(r) || !listed.has(keyOf(r.conv!))), ...loose.filter((r) => !r.conv || !listed.has(keyOf(r.conv)))].slice(0, 80);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [query, all, s.said]);
+	}, [query, all, s.envs.map((e) => e.said)]);
 	useEffect(() => setAt(0), [query]);
 	useEffect(() => {
 		// (In a block: scrolling answers with a promise, and an effect may only give back a function.)
@@ -422,7 +483,7 @@ const labelParts = (label: string): [string, string] => {
 };
 
 /** A request for the owner's approval. Values only the owner has are typed here and go straight to the daemon. */
-function ApprovalDialog({ req }: { req: Approval }) {
+function ApprovalDialog({ env, req }: { env: string; req: Approval }) {
 	const s = store;
 	const fields = req.inputs ?? [];
 	const [values, setValues] = useState<Record<string, string>>({});
@@ -430,9 +491,9 @@ function ApprovalDialog({ req }: { req: Approval }) {
 		if (fields.length) {
 			const empty = fields.find((f) => !values[f.name]?.trim());
 			if (empty) return void document.getElementById(`ap-${empty.name}`)?.focus();
-			return void s.decide(req.id, true, false, Object.fromEntries(fields.map((f) => [f.name, values[f.name].trim()])));
+			return void s.decide(env, req.id, true, false, Object.fromEntries(fields.map((f) => [f.name, values[f.name].trim()])));
 		}
-		void s.decide(req.id, true, always);
+		void s.decide(env, req.id, true, always);
 	};
 	useEffect(() => {
 		if (fields.length) return;
@@ -441,7 +502,7 @@ function ApprovalDialog({ req }: { req: Approval }) {
 			if (e.metaKey || e.ctrlKey || e.altKey) return;
 			if (e.key === "a" || e.key === "y") allow();
 			else if (e.key === "s" && req.remember) allow(true);
-			else if (e.key === "d" || e.key === "n") void s.decide(req.id, false);
+			else if (e.key === "d" || e.key === "n") void s.decide(env, req.id, false);
 			else return;
 			e.preventDefault();
 		};
@@ -459,14 +520,14 @@ function ApprovalDialog({ req }: { req: Approval }) {
 				<>
 					<Button variant="ghost" onClick={() => s.closeAsking()}>Later <kbd>esc</kbd></Button>
 					<span className="grow" />
-					<Button variant="danger" onClick={() => void s.decide(req.id, false)}>Deny{fields.length ? "" : <kbd>d</kbd>}</Button>
+					<Button variant="danger" onClick={() => void s.decide(env, req.id, false)}>Deny{fields.length ? "" : <kbd>d</kbd>}</Button>
 					{req.remember && !fields.length ? <Button onClick={() => allow(true)}>Always here <kbd>s</kbd></Button> : null}
 					<Button variant="primary" onClick={() => allow()}>{fields.length ? "Save and allow" : req.holds ? "Allow" : "Allow once"}{fields.length ? "" : <kbd>a</kbd>}</Button>
 				</>
 			}
 		>
 			<div className="row muted">
-				<span>{req.agent}</span>
+				<span>{req.agent}{s.on(env)}</span>
 				{req.task ? <span className="faint">task #{req.task}</span> : null}
 				<span className="tag mono">{req.tool}</span>
 			</div>
@@ -493,14 +554,14 @@ function ApprovalDialog({ req }: { req: Approval }) {
 }
 
 /** A question of the agent's: the answers it offers, and a line for the owner's own words. */
-function QuestionDialog({ req }: { req: Approval }) {
+function QuestionDialog({ env, req }: { env: string; req: Approval }) {
 	const s = store;
 	const choices = req.choices ?? [];
 	const [own, setOwn] = useState("");
 	const [at, setAt] = useState(0);
-	const answer = (text: string) => void s.decide(req.id, true, false, { answer: text });
+	const answer = (text: string) => void s.decide(env, req.id, true, false, { answer: text });
 	return (
-		<Dialog tone="accent" width={560} onClose={() => s.closeAsking()} title={<><Icon name="chat" /> {req.agent} asks</>} footer={<><Button variant="ghost" onClick={() => s.closeAsking()}>Later <kbd>esc</kbd></Button><span className="grow" /><Button variant="ghost" onClick={() => void s.decide(req.id, false)}>No answer</Button><Button variant="primary" disabled={!own.trim() && !choices.length} onClick={() => answer(own.trim() || choices[at])}>Answer</Button></>}>
+		<Dialog tone="accent" width={560} onClose={() => s.closeAsking()} title={<><Icon name="chat" /> {req.agent}{s.on(env)} asks</>} footer={<><Button variant="ghost" onClick={() => s.closeAsking()}>Later <kbd>esc</kbd></Button><span className="grow" /><Button variant="ghost" onClick={() => void s.decide(env, req.id, false)}>No answer</Button><Button variant="primary" disabled={!own.trim() && !choices.length} onClick={() => answer(own.trim() || choices[at])}>Answer</Button></>}>
 			<div style={{ whiteSpace: "pre-wrap" }}>{req.summary}</div>
 			{choices.length ? (
 				<div className="pick-list" style={{ padding: 0 }}>
@@ -531,10 +592,10 @@ function QuestionDialog({ req }: { req: Approval }) {
 
 function Asking() {
 	const s = useModel(store);
-	if (!s.asking) return null;
-	const req = s.tabs.map((t) => t.approvals.get(s.asking!)).find(Boolean)?.req;
-	if (!req) return null;
-	return req.tool === "question" ? <QuestionDialog req={req} /> : <ApprovalDialog req={req} />;
+	const open = s.asked_;
+	if (!open) return null;
+	const { env, req } = open;
+	return req.tool === "question" ? <QuestionDialog key={s.asking} env={env} req={req} /> : <ApprovalDialog key={s.asking} env={env} req={req} />;
 }
 
 function Help({ close }: { close: () => void }) {
@@ -634,7 +695,7 @@ export function App() {
 		window.addEventListener("drop", stop);
 		return () => (window.removeEventListener("dragover", stop), window.removeEventListener("drop", stop));
 	}, []);
-	const ready = s.service.status === "ready" && s.agents.length > 0 && s.active;
+	const ready = s.ready && s.active;
 	const tab = s.active;
 	// The side bar is as wide as it was dragged, as the panel on the other side is.
 	const [sideWidth, setSideWidth] = useState(() => Number(localStorage.getItem("pine.sidebar.width")) || 248);

@@ -6,13 +6,16 @@ export const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 export const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-let home = "";
-/** The owner's home folder, learned from a path the daemon names (an agent's workspace under ~/.pine, say). */
+/** The owner's home folders (one on each machine), learned from paths the daemons name (an agent's workspace under ~/.pine, say). */
+const homes = new Set<string>();
 export function learnHome(p: string | undefined): void {
 	const m = p && /^(\/Users\/[^/]+|\/home\/[^/]+)/.exec(p);
-	if (m && !home) home = m[1];
+	if (m) homes.add(m[1]);
 }
-export const tilde = (p: string) => (home && (p === home || p.startsWith(`${home}/`)) ? `~${p.slice(home.length)}` : p);
+export const tilde = (p: string) => {
+	for (const home of homes) if (p === home || p.startsWith(`${home}/`)) return `~${p.slice(home.length)}`;
+	return p;
+};
 export const baseName = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 
 export const took = (ms: number | undefined) => (ms === undefined ? "" : ms < 1000 ? `${Math.round(ms)} ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);

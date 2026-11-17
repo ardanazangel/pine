@@ -330,6 +330,54 @@ to choose for an upload, no passkey or system dialog, no copying out of the page
 typed without an input method. For those, close the app's Browser view and ask the agent in
 the terminal UI to show the browser, or set `"headed": true` for the browser.
 
+## Environments: pine on other machines
+
+The app can use the pine of other machines besides the one on this computer: a server, a
+desktop at home, anything you reach with `ssh`. Settings > Environments lists This Mac and the
+machines you added, each with a switch. Every environment that is on is connected at the same
+time: the side bar has a section for each, under its name, with its agents and their
+conversations, and conversations of both can be open side by side in tabs. Each is a pine of its
+own, so two agents of the same name (both have a `main`) are two agents: a tab of another
+machine says which beside the agent's name, and so do notifications ("main on server is done").
+
+| What | How |
+|---|---|
+| Add an environment | Type the host as you would after `ssh` (`server`, `user@server`, a name from `~/.ssh/config`) and choose Add and connect. The app connects to it at once and keeps it, on, when that pine answers; its agents appear in the side bar without a restart. What went wrong is said beside the field, and a host that does not answer is not kept |
+| Turn one on or off | The switch on its line. Off: its tabs close and its section leaves the side bar; a pine this app started for it is stopped, and an SSH link is closed. One environment always stays on |
+| Forget one | The bin beside a machine that is off |
+| One that does not answer | Its section in the side bar says so (connecting, reconnecting, not reached) with Try again; the others go on as they are. At start every environment that is on is connected at once, and a slow or broken one holds up none of the others |
+| Settings of which pine | The pages that are a pine's own (General, Agents, Models, MCP servers, Skills, Events, Instructions) show one environment's: with several on, a list at the top of the settings chooses which. The gear on an agent's line opens that agent's environment |
+| The event log | Each environment has its own: Events shows the one of the tab in front |
+
+What is chosen is kept in the app's `prefs.json` (`environments`: this computer and each
+machine, with whether it is on).
+
+How it connects: one ssh connection to the machine runs `pine service` there, with the PATH
+of the owner's login shell (sh, bash, zsh, fish, csh or tcsh) and nvm's node when pine was
+installed with it. It attaches to the daemon that runs there or starts one, held by that ssh
+as the local one is held by the app. The same connection then forwards a port of this
+computer to the daemon's port (`ssh -O forward` through its control socket, so there is one
+sign-in): ssh binds that port itself, and when somebody else took it, ssh says so at once and
+another is tried, so nothing is ever sent to a port that is not ssh's. The forward ends at the
+other machine's loopback, and only there: a service line that names another address is
+refused. So the control API stays closed to the network there: it takes requests for
+`127.0.0.1` only. A link that breaks is made again.
+
+| Needs | |
+|---|---|
+| A key, not a password | The app has no terminal to type a password in (`BatchMode=yes`): a key in `ssh-agent` (`ssh-add`), or an SSH service that signs you in by itself, such as Tailscale SSH |
+| A machine ssh knows | The app cannot answer ssh's question whether a new machine's key is the right one: connect to it once from a terminal (`ssh user@server`) and accept the key, then add it |
+| A pine with `pine service` | An older pine is not reached: update it there with `pine update` |
+| A pine home there | `pine init` on that machine first |
+
+Folders are the machine's whose pine the agent is of: for an agent of another machine,
+choosing a folder asks for its path there instead of opening the Finder, and a folder dropped
+from the Finder is refused. A folder dropped on the app's icon is for an agent of this computer.
+The Browser view of such a conversation shows the browser on that machine, and an address you
+type there (`localhost:3000`) is one of that machine.
+Settings > App is about the pine on this computer (started here or attached, restart, home
+folder).
+
 ## Settings
 
 `⌘,` opens the settings panel in a tab of its own, beside the conversations (the same key puts
@@ -348,7 +396,8 @@ of pine's: the app is your own hand, like a `pine` command.
 | Skills | Every skill with whom it is for. Read one, change it, add one for all agents or one agent, remove one. A skill that lies in a folder of yours that the configuration names is shown and not changed | `add_skill`, `remove_skill`; `pine skills` |
 | Events | **Sources**: what runs, who is subscribed, the last event; add one by type (the type's options as a form, what it will do said before it is added, a password or token typed into a field of its own), subscribe an agent or all agents, end a subscription, remove. **Schedules**: add (at set times, every so often, once), remove. **Routes**: add, remove | `add_source`, `subscribe`, `add_schedule`, `add_route`; `pine sources`, `pine subscribe`, `pine schedules` |
 | Instructions | The three files for all agents in pine's home: `AGENTS.md`, `TOOLS.md`, `USER.md` | Telling the main agent something that is for all agents |
-| App | The app's own settings (appearance, notifications, whether there is a newer app and whether that is asked at the start), and the pine it talks to: started here or attached, restart, home folder, the `pine` command for a terminal, and whether the browser of the web tools is on this Mac, with Fetch it when it is not | `pine browser-install` |
+| Environments | Which pines the app talks to, at the same time: this computer's and other machines' over SSH, each on or off (above) |  |
+| App | The app's own settings (appearance, notifications, whether there is a newer app and whether that is asked at the start), and the pine on this computer: started here or attached, restart, home folder, the `pine` command for a terminal, and whether the browser of the web tools is on this Mac, with Fetch it when it is not | `pine browser-install` |
 
 A secret you type on these pages (a model server's key, a source's token, a provider's API
 key) goes from the field to the daemon and from there into pine's `.env` or `auth.json`. It is

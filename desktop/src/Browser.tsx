@@ -4,7 +4,7 @@
 // wheel, keys, an address) goes back to it through the daemon. Nothing of a web page is loaded
 // into this window: the picture is drawn, and its address and title are text.
 import { useEffect, useRef, useState } from "react";
-import { api, type BrowserState, media } from "./api.ts";
+import { apiFor, type BrowserState, media } from "./api.ts";
 import { store, type Tab, useModel } from "./model.ts";
 import { errText } from "./text.ts";
 import { Button, Empty, Icon, Pulse } from "./ui.tsx";
@@ -45,14 +45,14 @@ export function BrowserView({ tab }: { tab: Tab }) {
 	// Where the browser is: asked while this view is open, and again after the agent used it.
 	useEffect(() => {
 		let over = false;
-		const look = () => void api.browser(tab.agent, tab.session).then((s) => !over && setState(s), () => {});
+		const look = () => void apiFor(tab.env).browser(tab.agent, tab.session).then((s) => !over && setState(s), () => {});
 		look();
 		const timer = window.setInterval(look, 1500);
 		return () => {
 			over = true;
 			window.clearInterval(timer);
 		};
-	}, [tab.agent, tab.session, tab.codeTick]);
+	}, [tab.env, tab.agent, tab.session, tab.codeTick]);
 
 	// The picture: one after another while a page is open, each drawn when it is whole.
 	const open = state?.open === true;
@@ -79,7 +79,7 @@ export function BrowserView({ tab }: { tab: Tab }) {
 			};
 			// No picture this time (the page is busy, or it was closed): the last one stays, and it is asked again.
 			picture.onerror = () => next(700);
-			picture.src = media.browser(tab.agent, tab.session, ++n);
+			picture.src = media.browser(tab.env, tab.agent, tab.session, ++n);
 		};
 		load();
 		return () => {
@@ -114,7 +114,7 @@ export function BrowserView({ tab }: { tab: Tab }) {
 		p.sending = true;
 		const ops = p.ops.splice(0);
 		try {
-			took(await api.browserInput(tab.agent, tab.session, ops));
+			took(await apiFor(tab.env).browserInput(tab.agent, tab.session, ops));
 		} catch (e) {
 			store.flash(errText(e), "bad");
 		}
@@ -148,7 +148,7 @@ export function BrowserView({ tab }: { tab: Tab }) {
 		if (!url.trim()) return;
 		setBusy(true);
 		try {
-			took(await api.browserOpen(tab.agent, tab.session, url.trim()));
+			took(await apiFor(tab.env).browserOpen(tab.agent, tab.session, url.trim()));
 			setAddress(undefined);
 			canvas.current?.focus();
 		} catch (e) {

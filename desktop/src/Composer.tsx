@@ -1,7 +1,7 @@
 // Where the owner writes: the message, the files that go with it, and under it what the
 // conversation runs on (folder, model, reasoning, mode), each a click away.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api } from "./api.ts";
+import { apiFor } from "./api.ts";
 import { bridge } from "./bridge.ts";
 import { COMMANDS, runSlash } from "./commands.ts";
 import { type Attachment, store, type Tab, useModel, useSignal } from "./model.ts";
@@ -58,7 +58,7 @@ export function Composer({ tab }: { tab: Tab }) {
 	const typed = useRef("");
 	const hearing = useRef(false);
 	const text = tab.draft;
-	const info = store.agent(tab.agent);
+	const info = store.agent(tab.env, tab.agent);
 
 	const set = (value: string) => {
 		tab.draft = value;
@@ -138,7 +138,7 @@ export function Composer({ tab }: { tab: Tab }) {
 		}
 		const mention = /(?:^|\s)@([^\s@]*)$/.exec(before);
 		if (mention) {
-			const found = await api.find(tab.agent, tab.session, mention[1].split("#")[0]).catch(() => ({ files: [] as string[] }));
+			const found = await apiFor(tab.env).find(tab.agent, tab.session, mention[1].split("#")[0]).catch(() => ({ files: [] as string[] }));
 			// What was typed meanwhile decides whether the answer is still wanted.
 			if (area.current && area.current.value.slice(0, area.current.selectionStart) !== before) return;
 			for (const f of found.files) tab.files.add(f);
@@ -238,6 +238,11 @@ export function Composer({ tab }: { tab: Tab }) {
 			if (!file) continue;
 			// A folder is opened for the conversation, as with /folder.
 			if (entry.webkitGetAsEntry()?.isDirectory) {
+				const remote = store.remoteOf(tab.env);
+				if (remote) {
+					store.flash(`A folder of this computer is not there for the pine on ${remote}. Give it one of ${remote} with the folder button.`, "bad", 7000);
+					continue;
+				}
 				const dir = bridge.pathOf(file);
 				if (dir) await store.setFolder(tab, dir);
 			} else files.push(file);
@@ -248,7 +253,7 @@ export function Composer({ tab }: { tab: Tab }) {
 
 	const mode = store.modeOf(tab);
 	const paused = store.bypassPaused(tab);
-	const tainted = store.taints.get(`${tab.agent}:${tab.session}`);
+	const tainted = store.taintOf(tab);
 	const modeTone = paused ? "warn" : mode === "bypass" ? "bad" : mode === "safe" ? "good" : mode === "plan" ? "plan" : "";
 	const goal = tab.goal && tab.goal.status !== "met" ? tab.goal : undefined;
 

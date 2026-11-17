@@ -1,13 +1,27 @@
 // Settings: everything about pine that is otherwise a command in a shell or a sentence to the
 // main agent. Each page asks the daemon what there is and tells it what to change; the daemon
 // checks every change as it checks the main agent's, and nothing here writes a file itself.
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { type AgentDetail, api, type LoginState, type Setting, type SourceType } from "./api.ts";
+import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import { type AgentDetail, type AgentInfo, type Api, apiFor, type LoginState, type Setting, type SourceType } from "./api.ts";
 import { bridge } from "./bridge.ts";
 import { Editor } from "./CodePanel.tsx";
-import { store, useModel } from "./model.ts";
+import { type Env, store, useModel } from "./model.ts";
 import { ago, errText, MODES, plural, REASONING, short, tilde } from "./text.ts";
 import { AutoText, Button, Confirm, Dialog, Empty, Field, Icon, Segmented, Pulse, Switch, useLoad } from "./ui.tsx";
+
+/**
+ * The pine whose settings a page shows. It is bound when the page is drawn, never looked up when
+ * a call is made: the environment chosen at the top changes by itself when one goes off, and a
+ * change that is on its way must still go to the pine it was made for. (The page is drawn anew
+ * for another environment: `key` in `Settings`.)
+ */
+const PineOfPage = createContext("local");
+
+function usePine(): { id: string; env: Env | undefined; api: Api; agents: AgentInfo[] } {
+	const id = useContext(PineOfPage);
+	const env = store.env(id);
+	return { id, env, api: apiFor(id), agents: env?.agents ?? [] };
+}
 
 const SECTIONS: Array<{ id: string; label: string; icon: string }> = [
 	{ id: "general", label: "General", icon: "sliders" },
@@ -17,6 +31,7 @@ const SECTIONS: Array<{ id: string; label: string; icon: string }> = [
 	{ id: "skills", label: "Skills", icon: "book" },
 	{ id: "events", label: "Events", icon: "bolt" },
 	{ id: "instructions", label: "Instructions", icon: "edit" },
+	{ id: "environments", label: "Environments", icon: "terminal" },
 	{ id: "app", label: "App", icon: "gear" },
 ];
 
@@ -41,11 +56,12 @@ function Loading({ state }: { state: { error?: string; loading: boolean } }) {
 
 /** Who something is for: all agents, or one. */
 function Whom({ value, onChange, all = "all agents" }: { value: string; onChange: (v: string) => void; all?: string }) {
-	const s = useModel(store);
+	useModel(store);
+	const { agents } = usePine();
 	return (
 		<select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
 			<option value="">{all}</option>
-			{s.agents.map((a) => <option key={a.id} value={a.id}>{a.id}</option>)}
+			{agents.map((a) => <option key={a.id} value={a.id}>{a.id}</option>)}
 		</select>
 	);
 }
@@ -55,6 +71,7 @@ const scopeText = (scope: string, session?: string) => (scope === "global" ? "al
 // ---- general ----------------------------------------------------------------------------------------
 
 function SettingRow({ s, models, reload }: { s: Setting; models: string[]; reload: () => void }) {
+	const { api, env } = usePine();
 	const [draft, setDraft] = useState<string>();
 	const set = async (value: unknown) => {
 		const done = await store.attempt(() => api.setSetting(s.key, value));
@@ -62,8 +79,8 @@ function SettingRow({ s, models, reload }: { s: Setting; models: string[]; reloa
 		setDraft(undefined);
 		store.flash(done.live ? `${s.key} is now ${done.now}.` : `${s.key} is saved; it holds from the next start of pine.`, "good", 3000);
 		reload();
-		void store.refreshTaints();
-		store.agents = await store.askAgents().catch(() => store.agents);
+		void store.refreshTaints(env);
+		await store.refreshAgents(env);
 		store.touch();
 	};
 	const k = s.kind;
@@ -110,6 +127,7 @@ function SettingRow({ s, models, reload }: { s: Setting; models: string[]; reloa
 }
 
 function General() {
+	const { api } = usePine();
 	const overview = useLoad(() => api.overview());
 	const settings = useLoad(() => api.settings());
 	const models = useLoad(() => api.models());
@@ -170,6 +188,7 @@ const FILES: Array<{ key: "instructions" | "soul" | "tooling" | "memory" | "rule
 ];
 
 function AgentPage({ id, back }: { id: string; back: () => void }) {
+	const { api, env: pine, id: envId, agents } = usePine();
 	const detail = useLoad(() => api.agentDetail(id), [id]);
 	const models = useLoad(() => api.models());
 	const [change, setChange] = useState<Record<string, unknown>>({});
@@ -191,17 +210,17 @@ function AgentPage({ id, back }: { id: string; back: () => void }) {
 		if (!done) return;
 		store.flash(`Updated ${id}; it holds from its next message on.${done.warnings.length ? ` Note: ${done.warnings.join("; ")}` : ""}`, done.warnings.length ? "warn" : "good", done.warnings.length ? 9000 : 3500);
 		detail.reload();
-		store.agents = await store.askAgents().catch(() => store.agents);
+		await store.refreshAgents(pine);
 		store.touch();
 	};
 	const remove = async () => {
-		if (await store.removeAgent(id)) back();
+		if (await store.removeAgent(envId, id)) back();
 	};
 	const addFolder = async (kind: "read" | "write") => {
-		const dir = await bridge.pickFolder(kind === "write" ? `A folder ${id} may read and change` : `A folder ${id} may read`);
+		const dir = await store.chooseFolder(envId, kind === "write" ? `A folder ${id} may read and change` : `A folder ${id} may read`);
 		if (dir) put(kind, [...((change[kind] as string[]) ?? []), dir]);
 	};
-	const others = store.agents.filter((a) => a.id !== id).map((a) => a.id);
+	const others = agents.filter((a) => a.id !== id).map((a) => a.id);
 	const meta = FILES.find((f) => f.key === file)!;
 	const text = texts[file] ?? d.files[file] ?? "";
 	const mode = now("mode");
@@ -209,7 +228,7 @@ function AgentPage({ id, back }: { id: string; back: () => void }) {
 		<Page
 			title={d.id}
 			lead={d.main ? "The main agent: it administers pine, and may hand work to every other agent." : `An agent with its own workspace at ${tilde(d.workspace)}.`}
-			actions={<><Button onClick={() => void store.openTab(id, "main")} icon="chat">Open</Button><Button variant="primary" disabled={!dirty || busy} onClick={() => void save()}>{busy ? "Saving…" : "Save changes"}</Button></>}
+			actions={<><Button onClick={() => void store.openTab(envId, id, "main")} icon="chat">Open</Button><Button variant="primary" disabled={!dirty || busy} onClick={() => void save()}>{busy ? "Saving…" : "Save changes"}</Button></>}
 		>
 			<Button className="back" small variant="ghost" icon="back" onClick={back}>Agents</Button>
 			<div className="group">
@@ -303,14 +322,14 @@ function AgentPage({ id, back }: { id: string; back: () => void }) {
 }
 
 function NewAgent({ close, made }: { close: () => void; made: (id: string) => void }) {
+	const { api, env: pine } = usePine();
 	const models = useLoad(() => api.models());
 	const [f, setF] = useState({ id: "", description: "", instructions: "", model: "" });
 	const create = async () => {
 		const instructions = f.instructions.trim() || `You are ${f.id}. ${f.description.trim().replace(/\.?$/, ".")}`;
 		const done = await store.attempt(() => api.createAgent({ id: f.id.trim(), description: f.description.trim(), instructions, model: f.model || undefined }));
 		if (!done) return;
-		store.agents = await store.askAgents().catch(() => store.agents);
-		void store.refreshConversations();
+		await store.refreshAgents(pine);
 		store.flash(`Created the agent ${done.id}.`, "good");
 		made(done.id);
 	};
@@ -331,16 +350,17 @@ function NewAgent({ close, made }: { close: () => void; made: (id: string) => vo
 
 function Agents() {
 	const s = useModel(store);
+	const { agents } = usePine();
 	// Which agent's page is open is the app's to say: the side bar opens one too. "+" is the new agent's dialog.
 	const open = s.settingsAgent !== "+" ? s.settingsAgent : undefined;
 	const adding = s.settingsAgent === "+";
 	const setOpen = (id?: string) => ((s.settingsAgent = id), s.touch());
 	const setAdding = (on: boolean) => setOpen(on ? "+" : undefined);
-	if (open && s.agents.some((a) => a.id === open)) return <AgentPage id={open} back={() => setOpen(undefined)} />;
+	if (open && agents.some((a) => a.id === open)) return <AgentPage id={open} back={() => setOpen(undefined)} />;
 	return (
 		<Page title="Agents" lead="An agent is a folder with a workspace, instructions and a model. Each has its own conversations and reach." actions={<Button variant="primary" icon="plus" onClick={() => setAdding(true)}>New agent</Button>}>
 			<div className="group">
-				{s.agents.map((a) => (
+				{agents.map((a) => (
 					<div className="item click" key={a.id} onClick={() => setOpen(a.id)}>
 						<div className="info">
 							<div className="name">{a.id}{a.main ? <span className="tag good">main</span> : null}<span className={`tag${a.mode === "bypass" ? " bad" : a.mode === "safe" ? " good" : ""}`}>{a.mode}</span></div>
@@ -360,6 +380,7 @@ function Agents() {
 
 /** pi's sign-in, shown step by step: a page to open, a code to type there, or a key to paste here. */
 function SignIn({ provider, type, close }: { provider: string; type?: "api_key" | "oauth"; close: (done: boolean, choose?: string[]) => void }) {
+	const { api } = usePine();
 	const [id, setId] = useState<string>();
 	const [state, setState] = useState<LoginState>();
 	const [answer, setAnswer] = useState("");
@@ -433,6 +454,7 @@ function SignIn({ provider, type, close }: { provider: string; type?: "api_key" 
 }
 
 function Models() {
+	const { api, env, agents } = usePine();
 	const providers = useLoad(() => api.providers());
 	const servers = useLoad(() => api.modelServers());
 	const models = useLoad(() => api.models());
@@ -441,13 +463,13 @@ function Models() {
 	const [locked, setLocked] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [all, setAll] = useState(false);
-	const s = useModel(store);
+	useModel(store);
 	// The model of every agent that has none of its own, and the agents whose model cannot answer.
 	const fallback = useLoad(() => api.settings().then((all) => all.find((x) => x.key === "defaults.model")?.now ?? "none"));
-	const details = useLoad(() => Promise.all(store.agents.map((a) => api.agentDetail(a.id))));
+	const details = useLoad(() => Promise.all(agents.map((a) => api.agentDetail(a.id))));
 	const own = (details.data ?? []).filter((d) => d.model).map((d) => `${d.id} (${d.model})`);
-	const stuck = s.agents.filter((a) => a.modelProblem);
-	const reload = () => (providers.reload(), servers.reload(), models.reload(), fallback.reload(), details.reload(), void store.refreshAgents());
+	const stuck = agents.filter((a) => a.modelProblem);
+	const reload = () => (providers.reload(), servers.reload(), models.reload(), fallback.reload(), details.reload(), void store.refreshAgents(env));
 	const add = async () => {
 		setBusy(true);
 		try {
@@ -522,14 +544,14 @@ function Models() {
 			<div className="group">
 				<div className="item fallback-model">
 					<div className="info"><div className="name mono">{fallback.data ?? "…"}</div><div className="about">Every agent that has no model of its own runs on it{own.length ? `. With a model of their own: ${own.join(", ")}` : ""}.</div></div>
-					<Button small onClick={() => void store.chooseDefaultModel().then(reload)}>Change…</Button>
+					<Button small onClick={() => void (env && store.chooseDefaultModel(env).then(reload))}>Change…</Button>
 				</div>
 				{stuck.map((a) => <div className="item" key={a.id}><div className="notice grow"><Icon name="alert" /><div><b>{a.id}</b> cannot answer: {a.modelProblem}</div></div></div>)}
 			</div>
 
 			<h2>Models you can use now</h2>
 			<div className="group"><div className="item"><div className="about mono selectable" style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.7 }}>{models.data ? models.data.join("   ") || "none: sign in to a provider or add a server" : "…"}</div></div></div>
-			{signIn ? <SignIn provider={signIn.provider} type={signIn.type} close={(_done, choose) => (setSignIn(undefined), reload(), choose ? void store.chooseDefaultModel(choose).then(reload) : undefined)} /> : null}
+			{signIn ? <SignIn provider={signIn.provider} type={signIn.type} close={(_done, choose) => (setSignIn(undefined), reload(), choose && env ? void store.chooseDefaultModel(env, choose).then(reload) : undefined)} /> : null}
 		</Page>
 	);
 }
@@ -545,6 +567,7 @@ function words(line: string): string[] {
 }
 
 function Mcp() {
+	const { api } = usePine();
 	const servers = useLoad(() => api.mcp());
 	const states = useLoad(() => api.mcpStates());
 	const [f, setF] = useState({ name: "", kind: "remote" as "remote" | "local", target: "", agent: "", description: "", taints: false });
@@ -615,6 +638,7 @@ function Mcp() {
 // ---- skills -----------------------------------------------------------------------------------------
 
 function Skills() {
+	const { api } = usePine();
 	const skills = useLoad(() => api.skills());
 	const [edit, setEdit] = useState<{ name: string; description: string; instructions: string; agent: string; isNew: boolean; managed: boolean }>();
 	const save = async () => {
@@ -683,9 +707,10 @@ function OptionField({ name, schema, required, value, onChange }: { name: string
 }
 
 function NewSource({ types, close, made }: { types: SourceType[]; close: () => void; made: () => void }) {
+	const { api } = usePine();
 	const [f, setF] = useState({ name: "", type: "", description: "", agent: "", own: false, note: "" });
 	const [options, setOptions] = useState<Record<string, unknown>>({});
-	const [plan, setPlan] = useState<Awaited<ReturnType<typeof api.proposeSource>>>();
+	const [plan, setPlan] = useState<Awaited<ReturnType<Api["proposeSource"]>>>();
 	const [values, setValues] = useState<Record<string, string>>({});
 	const [busy, setBusy] = useState(false);
 	const type = types.find((t) => t.name === f.type);
@@ -757,12 +782,13 @@ function NewSource({ types, close, made }: { types: SourceType[]; close: () => v
 }
 
 function Sources() {
-	const s = useModel(store);
+	useModel(store);
+	const { api, agents } = usePine();
 	const sources = useLoad(() => api.sources());
 	const types = useLoad(() => api.sourceTypes());
 	const [adding, setAdding] = useState(false);
 	const subscribe = async (name: string) => {
-		const agent = await store.pick({ title: `Who wakes on ${name}?`, items: [{ value: "*", label: "All agents", about: "each in its main conversation" }, ...s.agents.map((a) => ({ value: a.id, label: a.id, about: "in its main conversation" }))] });
+		const agent = await store.pick({ title: `Who wakes on ${name}?`, items: [{ value: "*", label: "All agents", about: "each in its main conversation" }, ...agents.map((a) => ({ value: a.id, label: a.id, about: "in its main conversation" }))] });
 		if (!agent) return;
 		const note = await store.pick({ title: "What is to be done when it reports something?", items: [{ value: "-", label: "Nothing in particular", about: "the agent decides by the event" }], free: true, placeholder: "A note that is shown with every event" });
 		if (note === undefined) return;
@@ -809,6 +835,7 @@ function Sources() {
 }
 
 function Schedules() {
+	const { api } = usePine();
 	const list = useLoad(() => api.schedules());
 	const [f, setF] = useState({ name: "", kind: "cron" as "cron" | "every" | "at" | "in", when: "", task: "", agent: "" });
 	const hint = { cron: "minute hour day month weekday, for example 0 7 * * 1-5 (weekdays at seven)", every: "an interval, for example 30m or 6h", at: "a moment, for example 2026-12-24T17:00", in: "from now, for example 20m" }[f.kind];
@@ -855,6 +882,7 @@ function Schedules() {
 }
 
 function Routes() {
+	const { api, agents } = usePine();
 	const list = useLoad(() => api.routes());
 	const s = useModel(store);
 	const empty = { name: "", on: "", when: "", agent: "", prompt: "", session: "", throttle: "", set: "", publish_topic: "", publish_payload: "" };
@@ -895,7 +923,7 @@ function Routes() {
 					<Field label="Only when" hint="Optional, as JSON."><input className="input mono" placeholder={'{"payload.open": true}'} value={f.when} onChange={(e) => setF({ ...f, when: e.target.value })} /></Field>
 					<Field label="At most one per" hint="Optional, a time such as 5m."><input className="input mono" value={f.throttle} onChange={(e) => setF({ ...f, throttle: e.target.value })} /></Field>
 					<Field label="Wake the agent">
-						<select className="input" value={f.agent} onChange={(e) => setF({ ...f, agent: e.target.value })}><option value="">nobody</option>{s.agents.map((a) => <option key={a.id} value={a.id}>{a.id}</option>)}</select>
+						<select className="input" value={f.agent} onChange={(e) => setF({ ...f, agent: e.target.value })}><option value="">nobody</option>{agents.map((a) => <option key={a.id} value={a.id}>{a.id}</option>)}</select>
 					</Field>
 					<Field label="In the conversation" hint="Empty: its main one. “new”: a fresh one for every event."><input className="input mono" disabled={!f.agent} value={f.session} onChange={(e) => setF({ ...f, session: e.target.value })} /></Field>
 					<Field label="With" wide hint="What it is told. {{payload.field}} stands for a value of the event."><input className="input" disabled={!f.agent} value={f.prompt} onChange={(e) => setF({ ...f, prompt: e.target.value })} /></Field>
@@ -921,6 +949,7 @@ function EventsPage() {
 // ---- instructions for all agents -------------------------------------------------------------------------
 
 function Instructions() {
+	const { api } = usePine();
 	const files = useLoad(() => api.shared());
 	const [name, setName] = useState("AGENTS.md");
 	const [texts, setTexts] = useState<Record<string, string>>({});
@@ -961,7 +990,9 @@ function AppPage() {
 		s.prefs = await bridge.prefs(change);
 		s.touch();
 	};
-	const service = s.service.status === "ready" ? s.service : undefined;
+	// The pine on this computer: the one this app can start, restart and give another home.
+	const local = s.env("local");
+	const service = local?.enabled && local.service.status === "ready" ? local.service : undefined;
 	const newer = s.update?.status === "newer" ? s.update : undefined;
 	// `pine` for a terminal: what the shell has, as the app's main process sees it.
 	const [command, setCommand] = useState<{ state: "none" | "here" | "other" | "unavailable"; why?: string; text: string }>();
@@ -969,7 +1000,7 @@ function AppPage() {
 	// (Looked at again whenever this page is opened: the browser may have been fetched in a terminal.)
 	useEffect(() => void store.checkBrowser(), []);
 	return (
-		<Page title="App" lead="How this window behaves, and the pine it talks to.">
+		<Page title="App" lead="How this window behaves, and the pine on this computer.">
 			<h2>This app</h2>
 			<div className="group">
 				<div className="item"><div className="info"><div className="name">Appearance</div><div className="about">Light, dark, or what the system is set to.</div></div><div className="ctl"><Segmented value={s.prefs.theme} onChange={(theme) => void set({ theme })} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} /></div></div>
@@ -988,9 +1019,9 @@ function AppPage() {
 				{s.updates ? <div className="item"><div className="info"><div className="name">Look for a newer version at the start</div><div className="about">One question to GitHub each time the app starts. It says nothing about this Mac or your pine.</div></div><div className="ctl"><Switch on={s.prefs.updates} onChange={(updates) => void set({ updates })} /></div></div> : null}
 				<div className="item"><div className="info"><div className="name">Notifications</div><div className="about">When an agent is done, stops with an error, needs your approval or asks you something while the window is not in front. The text is pine's own, never the agent's.</div></div><div className="ctl"><Switch on={s.prefs.notify} onChange={(notify) => void set({ notify })} /></div></div>
 			</div>
-			<h2>pine</h2>
+			<h2>pine on this Mac</h2>
 			<div className="group">
-				<div className="item"><div className="info"><div className="name">{service ? `pine ${service.version ?? ""}` : "pine"}<span className={`tag ${s.connected ? "good" : "warn"}`}>{s.connected ? "connected" : "not connected"}</span></div><div className="about">{service ? (service.started ? `Started by this app (${service.mode}), from ${service.from}. It stops when the app quits unless the switch below is on.` : "Attached to a pine that was already running. It goes on when this app quits.") : "Not running."}</div></div><div className="ctl">{service?.started ? <Button small icon="refresh" onClick={() => void s.attempt(() => bridge.restart())}>Restart</Button> : null}</div></div>
+				<div className="item"><div className="info"><div className="name">{service ? `pine ${service.version ?? ""}` : "pine"}<span className={`tag ${service && local?.connected ? "good" : "warn"}`}>{!local?.enabled ? "off" : service && local.connected ? "connected" : "not connected"}</span></div><div className="about">{!local?.enabled ? "This environment is off: turn it on under Environments." : service ? (service.started ? `Started by this app (${service.mode}), from ${service.from}. It stops when the app quits unless the switch below is on.` : "Attached to a pine that was already running. It goes on when this app quits.") : "Not running."}</div></div><div className="ctl">{service?.started ? <Button small icon="refresh" onClick={() => void s.attempt(() => bridge.restart("local"))}>Restart</Button> : null}</div></div>
 				<div className="item"><div className="info"><div className="name">Keep pine running after the app quits</div><div className="about">A pine this app starts then goes on in the background: schedules fire, sources report and Telegram answers while the window is closed. Holds from the next time the app starts pine.</div></div><div className="ctl"><Switch on={s.prefs.keepRunning} onChange={(keepRunning) => void set({ keepRunning })} /></div></div>
 				{command && (command.state !== "unavailable" || command.why) ? (
 					<div className="item command"><div className="info"><div className="name">pine in a terminal{command.state === "here" ? <span className="tag good">set up</span> : null}</div><div className="about">{command.text}</div></div><div className="ctl">{command.state === "none" ? <Button small onClick={() => void bridge.command("install").then(setCommand)}>Set up</Button> : command.state === "here" ? <Button small onClick={() => void bridge.command("remove").then(setCommand)}>Remove</Button> : null}</div></div>
@@ -1008,8 +1039,8 @@ function AppPage() {
 				<div className="item">
 					<div className="info"><div className="name">Home folder</div><div className="about mono">{tilde(service?.home ?? s.prefs.home ?? "~/.pine")}</div><div className="about">Where pine keeps its agents and settings. Another one is another pine. Changing it restarts a pine this app started.</div></div>
 					<div className="ctl">
-						{s.prefs.home ? <Button small onClick={() => void set({ home: "" }).then(() => bridge.retry())}>Use ~/.pine</Button> : null}
-						<Button small icon="folder" onClick={() => void bridge.pickFolder("A pine home folder").then((dir: string | undefined) => dir && set({ home: dir }).then(() => (service?.started ? bridge.restart() : bridge.retry())))}>Choose…</Button>
+						{s.prefs.home ? <Button small onClick={() => void set({ home: "" }).then(() => bridge.retry("local"))}>Use ~/.pine</Button> : null}
+						<Button small icon="folder" onClick={() => void bridge.pickFolder("A pine home folder").then((dir: string | undefined) => dir && set({ home: dir }).then(() => (service?.started ? bridge.restart("local") : bridge.retry("local"))))}>Choose…</Button>
 					</div>
 				</div>
 			</div>
@@ -1018,17 +1049,88 @@ function AppPage() {
 	);
 }
 
+/**
+ * Where pine runs: this computer, and other machines reached over SSH. Each that is on is
+ * connected and shown at the same time; one that fails holds up none of the others.
+ */
+function Environments() {
+	const s = useModel(store);
+	const [host, setHost] = useState("");
+	const [trying, setTrying] = useState<string>();
+	const [failed, setFailed] = useState<{ host: string; error: string }>();
+	/** Another machine: connected to first, and kept only when its pine answers. */
+	const add = async () => {
+		const h = host.trim();
+		if (!h) return;
+		setTrying(h);
+		setFailed(undefined);
+		const r = await bridge.addEnvironment(h).finally(() => setTrying(undefined));
+		if (r.error) return setFailed({ host: h, error: r.error });
+		setHost("");
+	};
+	const said = (r: { error?: string }) => r.error && s.flash(r.error, "bad");
+	const tag = (e: Env) => (!e.enabled ? <span className="tag">off</span> : e.service.status === "error" ? <span className="tag warn">not reached</span> : e.service.status === "starting" ? <span className="tag warn">connecting</span> : e.connected ? <span className="tag good">connected</span> : <span className="tag warn">reconnecting</span>);
+	const about = (e: Env) => {
+		const st = e.service;
+		if (!e.enabled) return e.host ? "A pine on that machine, over SSH. Off: not connected and not shown." : "The pine on this computer. Off: not used and not shown.";
+		if (st.status === "ready") return e.host ? `pine ${st.version ?? ""} · ${st.home} · over SSH, through a port of this computer` : `pine ${st.version ?? ""} · ${tilde(st.home)} · ${st.started ? "started by this app" : "attached to a pine that was already running"}`;
+		if (st.status === "error") return <span style={{ color: "var(--bad)" }}>{st.message}</span>;
+		return e.host ? "Connecting over SSH…" : "Looking for a running pine, or starting one…";
+	};
+	return (
+		<Page title="Environments" lead="Where the pines this app talks to run: this computer, and other machines you reach with ssh. Each one that is on is connected and stands in the side bar with its agents, all at the same time. Its conversations, folders and settings are that machine's.">
+			<div className="group">
+				{s.envs.map((e) => (
+					<div className="item" key={e.id} data-environment={e.id}>
+						<div className="info"><div className={`name${e.host ? " mono" : ""}`}>{e.host ?? "This Mac"}{tag(e)}</div><div className="about">{about(e)}</div></div>
+						<div className="ctl">
+							{e.enabled && e.service.status === "error" ? <Button small icon="refresh" onClick={() => void bridge.retry(e.id)}>Try again</Button> : null}
+							{e.host && !e.enabled ? <Button small variant="ghost" icon="trash" title={`Forget ${e.host}`} onClick={() => void bridge.forgetEnvironment(e.id).then(said)} /> : null}
+							<Switch on={e.enabled} onChange={(on) => void bridge.enableEnvironment(e.id, on).then(said)} />
+						</div>
+					</div>
+				))}
+			</div>
+			<h2>Add an SSH environment</h2>
+			<div className="group">
+				<div className="item">
+					<div className="info"><div className="name">Host</div><div className="about">As you would write it after ssh: host or user@host, or a name from ~/.ssh/config. The app connects to it at once and keeps it when its pine answers. It cannot type a password, so it needs a key in ssh-agent or Tailscale SSH.</div></div>
+					<div className="ctl">
+						<input className="input mono" style={{ width: 220 }} placeholder="user@host" value={host} onChange={(e) => setHost(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void add()} />
+						<Button small disabled={!host.trim() || Boolean(trying)} onClick={() => void add()}>{trying ? <><Pulse size={11} /> Connecting…</> : "Add and connect"}</Button>
+					</div>
+				</div>
+				{failed ? <div className="notice bad"><Icon name="alert" />Could not add {failed.host}: {failed.error}</div> : null}
+			</div>
+		</Page>
+	);
+}
+
+/** Of which environment's pine the pages are, where several are on: their agents, models and files are each its own. */
+const PER_PINE = new Set(["general", "agents", "models", "mcp", "skills", "events", "instructions"]);
+
 export function Settings() {
 	const s = useModel(store);
+	const several = s.shown.filter((e) => e.ready);
 	return (
 		<div className="settings">
 			<nav className="set-nav">
+				{several.length > 1 && PER_PINE.has(s.section) ? (
+					<label className="set-env" title="The environment whose pine these pages show and change">
+						<span className="faint">Settings of</span>
+						<select className="input" value={s.settingsEnv} onChange={(e) => ((s.settingsEnv = e.target.value), (s.settingsAgent = undefined), s.touch())}>
+							{several.map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
+						</select>
+					</label>
+				) : null}
 				{SECTIONS.map((x) => (
 					<div key={x.id} className={`side-row${s.section === x.id ? " on" : ""}`} onClick={() => ((s.section = x.id), (s.settingsAgent = undefined), s.touch())}><Icon name={x.icon} size={14} /><span>{x.label}</span></div>
 				))}
 			</nav>
-			<div className="set-page" key={s.section}>
-				{s.section === "agents" ? <Agents /> : s.section === "models" ? <Models /> : s.section === "mcp" ? <Mcp /> : s.section === "skills" ? <Skills /> : s.section === "events" ? <EventsPage /> : s.section === "instructions" ? <Instructions /> : s.section === "app" ? <AppPage /> : <General />}
+			<div className="set-page" key={`${s.settingsEnv}:${s.section}`}>
+				<PineOfPage.Provider value={s.settingsEnv}>
+					{s.section === "agents" ? <Agents /> : s.section === "models" ? <Models /> : s.section === "mcp" ? <Mcp /> : s.section === "skills" ? <Skills /> : s.section === "events" ? <EventsPage /> : s.section === "instructions" ? <Instructions /> : s.section === "environments" ? <Environments /> : s.section === "app" ? <AppPage /> : <General />}
+				</PineOfPage.Provider>
 			</div>
 		</div>
 	);

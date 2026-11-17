@@ -1,7 +1,7 @@
 // One tab's conversation: what was said, the work of each turn folded into a line, and what
 // waits for the owner. Each kind of line is a small component; the list only draws what changed.
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { type AgentDetail, api, type TranscriptEntry } from "./api.ts";
+import { type AgentDetail, apiFor, media, type TranscriptEntry } from "./api.ts";
 import { bridge } from "./bridge.ts";
 import { Composer } from "./Composer.tsx";
 import { Markdown } from "./markdown.tsx";
@@ -32,7 +32,7 @@ function Thought({ part, live }: { part: Extract<Part, { p: "thought" }>; live: 
 	);
 }
 
-function PartLine({ part, live }: { part: Part; live: boolean }) {
+function PartLine({ env, part, live }: { env: string; part: Part; live: boolean }) {
 	if (part.p === "thought") return <Thought part={part} live={live} />;
 	if (part.p === "words") return <div className="part-words">{part.text}</div>;
 	if (part.p === "child")
@@ -41,7 +41,7 @@ function PartLine({ part, live }: { part: Part; live: boolean }) {
 				<Status status={part.status} />
 				<span className="tool">↳ {part.agent}</span>
 				<span className="subject" style={{ fontFamily: "inherit" }}>{childKind(part.kind)} #{part.task}{part.how ? ` ${part.how}` : part.label ? `: ${part.label}` : ""}</span>
-				<button type="button" className="open-link" onClick={() => void store.openTask(part.task)}>open</button>
+				<button type="button" className="open-link" onClick={() => void store.openTask(env, part.task)}>open</button>
 			</div>
 		);
 	return (
@@ -79,11 +79,11 @@ function workHead(parts: Part[], done: boolean, ms?: number): string {
 		.join(" · ");
 }
 
-function Work({ item }: { item: Extract<Item, { t: "work" }> }) {
+function Work({ env, item }: { env: string; item: Extract<Item, { t: "work" }> }) {
 	const [open, setOpen] = useState(item.open);
 	const parts = item.parts;
 	// A turn with a single call or thought is that call or thought itself, with no line above it.
-	if (parts.length === 1 && item.done) return <div className="work"><div className="work-parts" style={{ borderTop: "none", paddingTop: 6 }}><PartLine part={parts[0]} live={false} /></div></div>;
+	if (parts.length === 1 && item.done) return <div className="work"><div className="work-parts" style={{ borderTop: "none", paddingTop: 6 }}><PartLine env={env} part={parts[0]} live={false} /></div></div>;
 	const shown = open ? parts : item.done ? [] : parts.slice(-6);
 	return (
 		<div className={`work${open ? " open" : ""}`}>
@@ -95,7 +95,7 @@ function Work({ item }: { item: Extract<Item, { t: "work" }> }) {
 			{shown.length ? (
 				<div className="work-parts">
 					{shown.map((p, i) => (
-						<PartLine key={open ? i : parts.length - shown.length + i} part={p} live={!item.done} />
+						<PartLine key={open ? i : parts.length - shown.length + i} env={env} part={p} live={!item.done} />
 					))}
 				</div>
 			) : null}
@@ -103,10 +103,10 @@ function Work({ item }: { item: Extract<Item, { t: "work" }> }) {
 	);
 }
 
-function Entry({ entry, agent }: { entry: TranscriptEntry; agent: string }) {
+function Entry({ env, entry, agent }: { env: string; entry: TranscriptEntry; agent: string }) {
 	const [open, setOpen] = useState(false);
 	if (entry.kind === "user") return <div className="it-user"><span className="from">task</span>{entry.text}</div>;
-	if (entry.kind === "text") return <Markdown text={entry.text ?? ""} where={{ agent }} />;
+	if (entry.kind === "text") return <Markdown text={entry.text ?? ""} where={{ env, agent }} />;
 	if (entry.kind === "thinking")
 		return (
 			<div className="thought">
@@ -124,13 +124,13 @@ function Entry({ entry, agent }: { entry: TranscriptEntry; agent: string }) {
 			</div>
 			{entry.result ? <div className="entry-result" style={entry.ok === false ? { color: "var(--bad)" } : undefined}>{short(entry.result, 4000)}</div> : null}
 			{(entry.images ?? []).map((id) => (
-				<div className="it-media" key={id} style={{ marginTop: 6, marginLeft: 22 }}><img src={`pine-media://daemon/media/tool/${encodeURIComponent(id)}`} alt="" onClick={(e) => window.dispatchEvent(new CustomEvent("pine:zoom", { detail: (e.target as HTMLImageElement).src }))} /></div>
+				<div className="it-media" key={id} style={{ marginTop: 6, marginLeft: 22 }}><img src={media.tool(env, id)} alt="" onClick={(e) => window.dispatchEvent(new CustomEvent("pine:zoom", { detail: (e.target as HTMLImageElement).src }))} /></div>
 			))}
 		</div>
 	);
 }
 
-function ApprovalCard({ item }: { item: Extract<Item, { t: "approval" }> }) {
+function ApprovalCard({ env, item }: { env: string; item: Extract<Item, { t: "approval" }> }) {
 	const { req, state } = item;
 	const question = req.tool === "question";
 	const head =
@@ -148,7 +148,7 @@ function ApprovalCard({ item }: { item: Extract<Item, { t: "approval" }> }) {
 				<div className="sum">{req.summary}</div>
 				{state === "open" && !question ? <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>{req.why}</div> : null}
 			</div>
-			{state === "open" ? <Button variant="primary" small onClick={() => store.ask(req.id)}>{question ? "Answer" : "Decide"}</Button> : null}
+			{state === "open" ? <Button variant="primary" small onClick={() => store.ask(env, req.id)}>{question ? "Answer" : "Decide"}</Button> : null}
 		</div>
 	);
 }
@@ -174,7 +174,7 @@ export function Steps({ items }: { items: Array<{ text: string; status: string }
 /** The menu of a message of the owner's: what can be done from it. */
 async function branchMenu(tab: Tab, task: number): Promise<void> {
 	const picked = await bridge.contextMenu([{ id: "branch", label: "Branch from here" }, ...(tab.folder ? [{ id: "worktree", label: "Branch from here into a worktree" }] : [])]);
-	if (picked === "branch" || picked === "worktree") await store.branch(tab.agent, tab.session, task, picked === "worktree");
+	if (picked === "branch" || picked === "worktree") await store.branch(tab.env, tab.agent, tab.session, task, picked === "worktree");
 }
 
 const zoom = (src: string) => window.dispatchEvent(new CustomEvent("pine:zoom", { detail: src }));
@@ -186,7 +186,7 @@ const Row = memo(function Row({ item, tab }: { item: Item; v: number; tab: Tab }
 				<div className="it-user" onContextMenu={item.task !== undefined && tab.kind === "chat" ? (e) => (e.preventDefault(), void branchMenu(tab, item.task!)) : undefined}>
 					{item.task !== undefined && tab.kind === "chat" ? (
 						<span className="branch-from">
-							<Button small variant="ghost" icon="branch" title="Branch from here: a new conversation that goes on from this message, with what was said up to it. This one stays as it is." onClick={() => void store.branch(tab.agent, tab.session, item.task)} />
+							<Button small variant="ghost" icon="branch" title="Branch from here: a new conversation that goes on from this message, with what was said up to it. This one stays as it is." onClick={() => void store.branch(tab.env, tab.agent, tab.session, item.task)} />
 						</span>
 					) : null}
 					{item.from ? <span className="from">{item.from}</span> : null}
@@ -195,9 +195,9 @@ const Row = memo(function Row({ item, tab }: { item: Item; v: number; tab: Tab }
 				</div>
 			);
 		case "answer":
-			return <Markdown text={item.text} live={item.live} where={{ agent: item.agent, session: tab.kind === "chat" ? tab.session : undefined }} />;
+			return <Markdown text={item.text} live={item.live} where={{ env: tab.env, agent: item.agent, session: tab.kind === "chat" ? tab.session : undefined }} />;
 		case "work":
-			return <Work item={item} />;
+			return <Work env={tab.env} item={item} />;
 		case "note":
 			return (
 				<div className={`it-note ${item.tone}`}>
@@ -220,7 +220,7 @@ const Row = memo(function Row({ item, tab }: { item: Item; v: number; tab: Tab }
 				</div>
 			);
 		case "approval":
-			return <ApprovalCard item={item} />;
+			return <ApprovalCard env={tab.env} item={item} />;
 		case "steps":
 			return <div className="card"><Steps items={item.items} /></div>;
 		case "media":
@@ -247,19 +247,19 @@ const Row = memo(function Row({ item, tab }: { item: Item; v: number; tab: Tab }
 		case "divider":
 			return <div className="it-divider">{item.text}</div>;
 		case "entry":
-			return <Entry entry={item.entry} agent={tab.agent} />;
+			return <Entry env={tab.env} entry={item.entry} agent={tab.agent} />;
 	}
 });
 
 /** Where a conversation begins: who this agent is, what it runs on and reaches, and what it has. */
 function Welcome({ tab }: { tab: Tab }) {
 	useModel(store);
-	const info = store.agent(tab.agent);
+	const info = store.agent(tab.env, tab.agent);
 	const [has, setHas] = useState<AgentDetail>();
 	useEffect(() => {
 		let live = true;
 		// (An older pine does not say; the line is then left out.)
-		api.agentDetail(tab.agent).then((d) => live && setHas(d), () => {});
+		apiFor(tab.env).agentDetail(tab.agent).then((d) => live && setHas(d), () => {});
 		return () => {
 			live = false;
 		};
@@ -296,7 +296,7 @@ function Welcome({ tab }: { tab: Tab }) {
 			</p>
 			<div className="hints">
 				<Button small onClick={() => say("What can you do for me, and what are you set up with?")}>What can you do?</Button>
-				<Button small icon="gear" onClick={() => store.openSettings("agents", tab.agent)}>Agent settings</Button>
+				<Button small icon="gear" onClick={() => store.openSettings("agents", tab.agent, tab.env)}>Agent settings</Button>
 				<Button small icon="folder" onClick={() => void store.pickFolder(tab)}>Give it a folder</Button>
 				<Button small icon="command" onClick={() => void store.command("palette")}>Commands <kbd>⌘K</kbd></Button>
 			</div>
@@ -379,9 +379,9 @@ function StatusLine({ tab }: { tab: Tab }) {
 	const elsewhere = store.tabs.find((t) => t !== tab && t.approvals.size > 0);
 	const goal = tab.goal?.status === "active" ? tab.goal : undefined;
 	if (!tab.busy) {
-		if (waiting.length) return <div className="status warn"><Icon name="alert" size={14} /><span>{waiting[0].req.tool === "question" ? "A question waits for your answer." : "A request waits for your approval."}</span><Button small onClick={() => store.ask(waiting[0].req.id)}>Open</Button></div>;
+		if (waiting.length) return <div className="status warn"><Icon name="alert" size={14} /><span>{waiting[0].req.tool === "question" ? "A question waits for your answer." : "A request waits for your approval."}</span><Button small onClick={() => store.ask(tab.env, waiting[0].req.id)}>Open</Button></div>;
 		if (goal) return <div className="status"><Icon name="target" size={14} /><span>goal · round {goal.round} of {goal.until} · checking whether it is met</span><Button small onClick={() => void store.setGoal(tab, "pause")}>Pause</Button></div>;
-		if (elsewhere) return <div className="status warn"><Icon name="alert" size={14} /><span>{elsewhere.agent} · {elsewhere.session} waits for you.</span><Button small onClick={() => store.activate(elsewhere)}>Go there</Button></div>;
+		if (elsewhere) return <div className="status warn"><Icon name="alert" size={14} /><span>{elsewhere.agent}{store.on(elsewhere.env)} · {elsewhere.session} waits for you.</span><Button small onClick={() => store.activate(elsewhere)}>Go there</Button></div>;
 		if (tab.programs.length) return <div className="status"><Icon name="play" size={13} /><span>{plural(tab.programs.length, "program")} still running</span><Button small variant="ghost" onClick={() => void store.command("code-running")}>Show</Button></div>;
 		return <div className="status" />;
 	}
@@ -405,7 +405,7 @@ function StatusLine({ tab }: { tab: Tab }) {
 			{goal ? <span>goal · round {goal.round} of {goal.until}</span> : null}
 			{parts.map((p, i) => <span key={i} className={i || goal ? "sep" : ""}>{p}</span>)}
 			<span className="grow" />
-			{waiting.length ? <Button small onClick={() => store.ask(waiting[0].req.id)}>Open</Button> : null}
+			{waiting.length ? <Button small onClick={() => store.ask(tab.env, waiting[0].req.id)}>Open</Button> : null}
 		</div>
 	);
 }
@@ -418,9 +418,10 @@ function ConvHead({ tab }: { tab: Tab }) {
 	return (
 		<div className="conv-head">
 			<span className="avatar">{tab.agent.slice(0, 1).toUpperCase()}</span>
+			{store.shown.length > 1 ? <><span className="faint" title="The environment whose pine this is">{store.env(tab.env)?.label}</span><span className="faint">/</span></> : null}
 			<span className="muted">{tab.agent}</span>
 			<span className="faint">/</span>
-			<b className="cut" title={chat ? `conversation ${tab.session}` : undefined}>{chat ? store.titleOf(tab.agent, tab.session) : `task #${tab.task}`}</b>
+			<b className="cut" title={chat ? `conversation ${tab.session}` : undefined}>{chat ? store.titleOf(tab.env, tab.agent, tab.session) : `task #${tab.task}`}</b>
 			{chat && tab.worktree ? (
 				<button type="button" className="chip worktree" title={`Works in the worktree ${tab.worktree.branch} of ${tab.worktree.base}${tab.folder ? `, at ${tab.folder}` : ""}: merge it, update it or discard it`} onClick={() => void store.worktreeMenu(tab)}>
 					<Icon name="branch" size={12} />
@@ -429,7 +430,7 @@ function ConvHead({ tab }: { tab: Tab }) {
 			) : chat && tab.folder ? (
 				<button type="button" className="chip" title={`Works in ${tab.folder}`} onClick={() => void store.pickFolder(tab)}><Icon name="folder" size={12} /><span className="cut">{tilde(tab.folder)}</span></button>
 			) : null}
-			{chat && store.pins.has(tab.key) ? <Icon name="star" size={12} className="faint" /> : null}
+			{chat && store.isPinned(tab) ? <Icon name="star" size={12} className="faint" /> : null}
 			<span className="grow" />
 			{tab.context !== undefined ? (
 				<span className="conv-meta" title={`Context ${tab.context}% full${tab.cacheShare !== undefined ? ` · ${tab.cacheShare}% of the last request came from the model server's cache` : ""}${speedText(tab.speed) ? ` · ${speedText(tab.speed)}` : ""}`}>
