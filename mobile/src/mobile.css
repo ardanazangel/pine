@@ -1,0 +1,104 @@
+/* The desktop page on a phone's screen. Only what a narrow screen needs is changed here; every
+   colour and size comes from the desktop's own variables. */
+
+html,
+body,
+#root {
+	height: 100%;
+}
+body {
+	background: var(--bg);
+	/* A finger selects nothing by accident, as on the desktop; text in an answer stays selectable there. */
+	-webkit-tap-highlight-color: rgb(0 0 0 / 0);
+}
+.app {
+	padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+	background: var(--sunk);
+}
+
+/* The pairing screen. */
+.pair {
+	max-width: 420px;
+	margin: 0 auto;
+	padding: calc(env(safe-area-inset-top) + 48px) 24px 24px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+.pair h1 {
+	margin: 0;
+	font-size: 28px;
+}
+.pair p {
+	margin: 0;
+}
+.pair label {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.pair input {
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	border-radius: var(--r-m, 8px);
+	background: var(--surface);
+	font-size: 16px;
+}
+.pair .btn {
+	justify-content: center;
+	padding: 10px;
+	font-size: 16px;
+}
+.pair .error {
+	color: var(--bad);
+}
+
+@media (max-width: 760px) {
+	/* The side bar lies over the conversation, as a drawer, and goes when a conversation is chosen. */
+	.sidebar {
+		position: fixed;
+		z-index: 40;
+		top: 0;
+		bottom: 0;
+		left: 0;
+		width: min(86vw, 340px);
+		padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) env(safe-area-inset-left);
+		background: var(--sunk);
+		box-shadow: var(--shadow-l);
+	}
+	.splitter {
+		display: none;
+	}
+	.side-top,
+	.app.no-sidebar:not(.fullscreen) .titlebar,
+	.titlebar {
+		padding-left: 8px;
+	}
+	.body,
+	.app.no-sidebar .body {
+		padding: 0;
+	}
+	.conv {
+		border-radius: 0;
+	}
+	/* The panel beside a conversation needs a wide screen: on a phone the conversation has it all. */
+	.code,
+	.splitter.code {
+		display: none;
+	}
+	/* Big enough for a finger. */
+	.side-row,
+	.side-agent {
+		min-height: 40px;
+	}
+	.composer textarea {
+		/* Under 16px Safari zooms the page into the field. */
+		font-size: 16px;
+	}
+	.dialog {
+		max-width: calc(100vw - 24px);
+	}
+	.scrim {
+		padding-top: calc(env(safe-area-inset-top) + 24px);
+	}
+}

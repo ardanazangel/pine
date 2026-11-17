@@ -1,0 +1,8 @@
+{
+	"extends": "../desktop/tsconfig.json",
+	"compilerOptions": {
+		// One React: the desktop's (as vite.config.ts does for the build).
+		"paths": { "react": ["../desktop/node_modules/@types/react"], "react/*": ["../desktop/node_modules/@types/react/*"], "react-dom/*": ["../desktop/node_modules/@types/react-dom/*"] }
+	},
+	"include": ["src", "../desktop/src", "vite.config.ts", "capacitor.config.ts"]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "pine-mobile",
+  "productName": "Pine",
+  "version": "0.1.0",
+  "description": "Pine on a phone: the desktop app's page, talking to a pine on your computer",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "vite build && cap sync ios",
+    "check": "tsc --noEmit",
+    "ios": "vite build && cap run ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.6.2",
+    "@capacitor/ios": "^8.6.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.6.2",
+    "@types/node": "^26.6.6",
+    "@vitejs/plugin-react": "^6.3.0",
+    "playwright-core": "^1.65.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}
