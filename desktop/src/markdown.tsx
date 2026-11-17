@@ -12,7 +12,7 @@ import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
 import { memo, useEffect, useRef } from "react";
-import { api, media } from "./api.ts";
+import { apiFor, media } from "./api.ts";
 import { bridge } from "./bridge.ts";
 import { mediaKind } from "./model.ts";
 import { errText, short } from "./text.ts";
@@ -30,16 +30,20 @@ const CLEAN = {
 const isWeb = (url: string) => /^https?:\/\//i.test(url);
 
 export interface Where {
+	/** The environment whose pine the agent is of: its files and pictures are fetched there. */
+	env: string;
 	agent: string;
 	session?: string;
 }
 
 /** A line to click instead of a picture: the address is shown, and nothing is fetched before the click. */
-function remote(url: string, alt: string): HTMLElement {
+function remote(url: string, alt: string, env: string): HTMLElement {
 	const kind = mediaKind(url.split(/[?#]/)[0]) ?? "image";
 	const el = document.createElement("span");
 	el.className = "md-remote";
 	el.dataset.remote = url;
+	// The pine that fetches it, on the click: the one whose agent wrote it.
+	el.dataset.env = env;
 	el.dataset.alt = alt;
 	el.title = url;
 	el.textContent = `Load ${kind === "image" ? "picture" : kind} · ${short(url, 90)}`;
@@ -168,7 +172,7 @@ function decorate(frag: DocumentFragment, where?: Where): void {
 	for (const img of frag.querySelectorAll("img")) {
 		const src = img.getAttribute("src") ?? "";
 		const alt = img.getAttribute("alt") ?? "";
-		if (isWeb(src)) img.replaceWith(remote(src, alt));
+		if (isWeb(src)) img.replaceWith(remote(src, alt, where?.env ?? "local"));
 		else if (/^data:image\/(png|jpeg|gif|webp);base64,/i.test(src)) img.replaceWith(player("image", src, alt));
 		else if (where && src && !/^[a-z][a-z0-9+.-]*:/i.test(src)) {
 			const kind = mediaKind(src.split(/[?#]/)[0]);
@@ -178,7 +182,7 @@ function decorate(frag: DocumentFragment, where?: Where): void {
 			} catch {
 				// as written
 			}
-			if (kind) img.replaceWith(player(kind, media.workspace(where.agent, file, where.session), alt));
+			if (kind) img.replaceWith(player(kind, media.workspace(where.env, where.agent, file, where.session), alt));
 			else img.replaceWith(document.createTextNode(alt || src));
 		} else img.replaceWith(document.createTextNode(alt || src));
 	}
@@ -204,7 +208,7 @@ async function onClick(e: MouseEvent): Promise<void> {
 		const url = load.dataset.remote!;
 		load.textContent = `Loading · ${short(url, 90)}`;
 		try {
-			const got = await api.fetchImage(url);
+			const got = await apiFor(load.dataset.env ?? "local").fetchImage(url);
 			const kind = got.mime.startsWith("video/") ? "video" : got.mime.startsWith("audio/") ? "audio" : "image";
 			const blob = new Blob([Uint8Array.from(atob(got.base64), (c) => c.charCodeAt(0))], { type: got.mime });
 			load.replaceWith(player(kind, URL.createObjectURL(blob), load.dataset.alt ?? ""));
@@ -238,6 +242,6 @@ export const Markdown = memo(function Markdown({ text, where, live }: { text: st
 			if (pending.current) cancelAnimationFrame(pending.current);
 			pending.current = 0;
 		};
-	}, [text, where?.agent, where?.session, live]);
+	}, [text, where?.env, where?.agent, where?.session, live]);
 	return <div ref={ref} className={`md${live ? " md-live" : ""}`} onClick={(e) => void onClick(e.nativeEvent)} />;
 });

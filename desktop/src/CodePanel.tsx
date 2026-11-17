@@ -17,7 +17,7 @@ import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import { useEffect, useRef, useState } from "react";
-import { api, type Change, media, type TranscriptEntry } from "./api.ts";
+import { apiFor, type Change, media, type TranscriptEntry } from "./api.ts";
 import { AgentView } from "./AgentView.tsx";
 import { bridge } from "./bridge.ts";
 import { BrowserView } from "./Browser.tsx";
@@ -152,9 +152,9 @@ function ChangeRow({ c, on, pick }: { c: Change; on: boolean; pick: () => void }
 
 /** What differs from the last commit, or from before the owner's last message. */
 function Changes({ tab, turn, openFile }: { tab: Tab; turn: boolean; openFile: (file: string) => void }) {
-	const list = useLoad(async () => (turn ? { ...(await api.turn(tab.agent, tab.session)), repo: true, branch: undefined as string | undefined } : { ...(await api.changes(tab.agent, tab.session)), note: undefined as string | undefined, prompt: undefined as string | undefined }), [tab.key, tab.codeTick, turn]);
+	const list = useLoad(async () => (turn ? { ...(await apiFor(tab.env).turn(tab.agent, tab.session)), repo: true, branch: undefined as string | undefined } : { ...(await apiFor(tab.env).changes(tab.agent, tab.session)), note: undefined as string | undefined, prompt: undefined as string | undefined }), [tab.key, tab.codeTick, turn]);
 	const [file, setFile] = useState<string>();
-	const diff = useLoad(async () => (file ? (turn ? api.turnDiff(tab.agent, tab.session, file) : api.diff(tab.agent, tab.session, file)) : undefined), [tab.key, file, tab.codeTick, turn]);
+	const diff = useLoad(async () => (file ? (turn ? apiFor(tab.env).turnDiff(tab.agent, tab.session, file) : apiFor(tab.env).diff(tab.agent, tab.session, file)) : undefined), [tab.key, file, tab.codeTick, turn]);
 	useEffect(() => setFile(undefined), [tab.key, turn]);
 	const data = list.data;
 	// A change is named from the top of its repository; a file is opened by its path in the folder.
@@ -206,7 +206,7 @@ function Tree({ tab, dir, depth, pick, tick }: { tab: Tab; dir: string; depth: n
 	const [, redraw] = useState(0);
 	useEffect(() => {
 		let live = true;
-		api.tree(tab.agent, tab.session, dir).then(
+		apiFor(tab.env).tree(tab.agent, tab.session, dir).then(
 			(r) => live && (state.dirs.set(dir, r.entries), redraw((n) => n + 1)),
 			() => live && (state.dirs.set(dir, []), redraw((n) => n + 1)),
 		);
@@ -250,7 +250,7 @@ function Tree({ tab, dir, depth, pick, tick }: { tab: Tab; dir: string; depth: n
 
 /** One file, to read and to change. What the agent changes meanwhile is shown unless the owner has typed. */
 function FileView({ tab, file, close }: { tab: Tab; file: string; close: () => void }) {
-	const disk = useLoad(() => api.file(tab.agent, tab.session, file), [tab.key, file, tab.codeTick]);
+	const disk = useLoad(() => apiFor(tab.env).file(tab.agent, tab.session, file), [tab.key, file, tab.codeTick]);
 	const [draft, setDraft] = useState<string>();
 	const [saving, setSaving] = useState(false);
 	const [base, setBase] = useState<string>();
@@ -267,7 +267,7 @@ function FileView({ tab, file, close }: { tab: Tab; file: string; close: () => v
 		if (!dirty || saving) return;
 		setSaving(true);
 		try {
-			await api.writeFile(tab.agent, tab.session, file, draft!);
+			await apiFor(tab.env).writeFile(tab.agent, tab.session, file, draft!);
 			setBase(draft);
 			tab.codeTick++;
 			tab.touch();
@@ -297,7 +297,7 @@ function FileView({ tab, file, close }: { tab: Tab; file: string; close: () => v
 			) : null}
 			<div className="code-body">
 				{kind ? (
-					<div className="it-media" style={{ padding: 14 }}>{kind === "image" ? <img src={media.workspace(tab.agent, file, tab.session)} alt={file} /> : kind === "video" ? <video src={media.workspace(tab.agent, file, tab.session)} controls /> : <audio src={media.workspace(tab.agent, file, tab.session)} controls />}</div>
+					<div className="it-media" style={{ padding: 14 }}>{kind === "image" ? <img src={media.workspace(tab.env, tab.agent, file, tab.session)} alt={file} /> : kind === "video" ? <video src={media.workspace(tab.env, tab.agent, file, tab.session)} controls /> : <audio src={media.workspace(tab.env, tab.agent, file, tab.session)} controls />}</div>
 				) : disk.error ? (
 					<Empty icon="file" title="This file cannot be shown">{disk.error}</Empty>
 				) : !disk.data ? (
@@ -315,7 +315,7 @@ function FileView({ tab, file, close }: { tab: Tab; file: string; close: () => v
 function Files({ tab, file, setFile }: { tab: Tab; file?: string; setFile: (file?: string) => void }) {
 	const [tick, setTick] = useState(0);
 	const [query, setQuery] = useState("");
-	const found = useLoad(async () => (query.trim() ? (await api.find(tab.agent, tab.session, query.trim())).files : undefined), [tab.key, query]);
+	const found = useLoad(async () => (query.trim() ? (await apiFor(tab.env).find(tab.agent, tab.session, query.trim())).files : undefined), [tab.key, query]);
 	useEffect(() => setTick((n) => n + 1), [tab.codeTick]);
 	if (file) return <FileView tab={tab} file={file} close={() => setFile(undefined)} />;
 	const root = tab.folder ?? tab.workspace;
@@ -340,10 +340,10 @@ function Files({ tab, file, setFile }: { tab: Tab; file?: string; setFile: (file
 /** The tool calls of the last messages, each with what it printed. */
 function Output({ tab }: { tab: Tab }) {
 	const calls = useLoad(async () => {
-		const tasks = (await api.history(tab.agent, tab.session, 8)).filter((x) => x.depth === 0 && !x.meta?.compact);
+		const tasks = (await apiFor(tab.env).history(tab.agent, tab.session, 8)).filter((x) => x.depth === 0 && !x.meta?.compact);
 		const out: Array<{ task: number; n: number; entry: TranscriptEntry }> = [];
 		for (const task of tasks) {
-			const entries = (await api.transcript(task.id, true).catch(() => undefined))?.entries ?? [];
+			const entries = (await apiFor(tab.env).transcript(task.id, true).catch(() => undefined))?.entries ?? [];
 			entries.filter((e) => e.kind === "tool").forEach((entry, n) => out.push({ task: task.id, n, entry }));
 		}
 		return out;
@@ -363,7 +363,7 @@ function Output({ tab }: { tab: Tab }) {
 				</div>
 				<div className="code-body">
 					<div className="out" style={shown.entry.ok === false ? { color: "var(--bad)" } : undefined}>{shown.entry.result || "(it printed nothing)"}</div>
-					{(shown.entry.images ?? []).map((id) => <div className="it-media" key={id} style={{ padding: 12 }}><img src={media.tool(id)} alt="" /></div>)}
+					{(shown.entry.images ?? []).map((id) => <div className="it-media" key={id} style={{ padding: 12 }}><img src={media.tool(tab.env, id)} alt="" /></div>)}
 				</div>
 			</>
 		);
@@ -391,7 +391,7 @@ function Running({ tab }: { tab: Tab }) {
 					<div className="row">
 						<span className="dot good" />
 						<span className="mono cut grow" title={p.command}>{p.command}</span>
-						<Confirm label="Stop" sure="Stop it?" onConfirm={() => void store.attempt(() => api.stopProgram(tab.agent, tab.session, p.id)).then(() => store.flash("Stopping…"))} />
+						<Confirm label="Stop" sure="Stop it?" onConfirm={() => void store.attempt(() => apiFor(tab.env).stopProgram(tab.agent, tab.session, p.id)).then(() => store.flash("Stopping…"))} />
 					</div>
 					<div className="row faint" style={{ fontSize: 12 }}>
 						<span>running for {clock(p.seconds)}</span>

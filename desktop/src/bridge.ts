@@ -7,11 +7,22 @@ declare global {
 	}
 }
 
-export type ServiceState = { status: "starting" } | { status: "ready"; mode: string; started: boolean; home: string; version?: string; from: string } | { status: "error"; kind: "no-home" | "no-node" | "no-pine" | "failed"; message: string };
+export type ServiceState = { status: "starting" } | { status: "ready"; mode: string; started: boolean; home: string; version?: string; from: string; remote?: string } | { status: "error"; kind: "no-home" | "no-node" | "no-pine" | "ssh" | "failed"; message: string };
+
+/** An environment as the main process tells of it: this computer, or a machine over SSH. */
+export interface EnvironmentView {
+	id: string;
+	host?: string;
+	label: string;
+	enabled: boolean;
+	state: ServiceState;
+	connected: boolean;
+}
 
 export interface Prefs {
 	home?: string;
 	keepRunning: boolean;
+	environments: Array<{ id: string; host?: string; enabled: boolean }>;
 	theme: "system" | "light" | "dark";
 	notify: boolean;
 	updates: boolean;

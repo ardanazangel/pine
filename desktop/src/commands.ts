@@ -1,6 +1,6 @@
 // What can be asked for by name: in the palette, from a menu, or typed with a slash in front, as
 // in the terminal UI. One list, so that the three never differ.
-import { api } from "./api.ts";
+import { apiFor } from "./api.ts";
 import { store, type Tab } from "./model.ts";
 import { ago, errText, MODES, oneLine, plural, REASONING, short } from "./text.ts";
 
@@ -18,16 +18,20 @@ export interface Command {
 
 const chat = (tab: Tab | undefined): Tab | undefined => (tab?.kind === "chat" ? tab : (store.flash("Switch to a conversation first."), undefined));
 const menu = (name: string) => () => store.command(name);
+/** The environment a command is for: the one of the tab in front. */
+const envOf = (tab: Tab | undefined): string => (tab && tab.kind !== "settings" ? tab.env : (store.envInFront() ?? "local"));
 
 export const COMMANDS: Command[] = [
-	{ name: "new", title: "New conversation", about: "A new conversation with this agent, in a new tab", hint: "[name]", keys: "⌘T", run: (args, tab) => (args.trim() && tab ? store.openTab(tab.agent, args.trim()) : store.newConversation()) },
+	{ name: "new", title: "New conversation", about: "A new conversation with this agent, in a new tab", hint: "[name]", keys: "⌘T", run: (args, tab) => (args.trim() && tab?.kind === "chat" ? store.openTab(tab.env, tab.agent, args.trim()) : store.newConversation()) },
 	{
 		name: "agent", title: "New conversation with another agent", about: "Open a tab with another agent", hint: "<id> [session]", keys: "⇧⌘T",
-		run: (args) => {
+		run: (args, tab) => {
 			const [id, session] = args.trim().split(/\s+/);
 			if (!id) return store.command("agent");
-			if (!store.agent(id)) return store.flash(`There is no agent "${id}".`, "bad");
-			return store.openTab(id, session || "main");
+			// The environment in front first: another one may have an agent of the same name.
+			const env = [envOf(tab), ...store.shown.map((e) => e.id)].find((e) => store.agent(e, id));
+			if (!env) return store.flash(`There is no agent "${id}".`, "bad");
+			return store.openTab(env, id, session || "main");
 		},
 	},
 	{
@@ -35,14 +39,14 @@ export const COMMANDS: Command[] = [
 		run: async (args, tab) => {
 			const t = chat(tab);
 			if (!t) return;
-			if (args.trim()) return store.openTab(t.agent, args.trim());
-			const list = await api.sessions(t.agent).catch(() => []);
+			if (args.trim()) return store.openTab(t.env, t.agent, args.trim());
+			const list = await apiFor(t.env).sessions(t.agent).catch(() => []);
 			const session = await store.pick({ title: `Conversations of ${t.agent}`, items: list.map((s) => ({ value: s.session, label: `${s.pinned || s.session === "main" ? "★ " : ""}${s.session}`, about: `${plural(s.tasks, "message")} · ${ago(s.last)}${s.folder ? ` · ${s.folder}` : ""}` })), current: t.session, placeholder: "Search conversations" });
-			if (session) await store.openTab(t.agent, session);
+			if (session) await store.openTab(t.env, t.agent, session);
 		},
 	},
 	{ name: "close", title: "Close tab", about: "Close this tab; the conversation stays in the list", keys: "⌘W", run: menu("close") },
-	{ name: "rename", title: "Rename conversation", about: "Another name for this conversation and its tab", hint: "<name>", chat: true, run: (args, tab) => (chat(tab) ? (args.trim() ? store.rename(tab!.agent, tab!.session, args.trim()) : store.askRename(tab!)) : undefined) },
+	{ name: "rename", title: "Rename conversation", about: "Another name for this conversation and its tab", hint: "<name>", chat: true, run: (args, tab) => (chat(tab) ? (args.trim() ? store.rename(tab!.env, tab!.agent, tab!.session, args.trim()) : store.askRename(tab!)) : undefined) },
 	{ name: "pin", title: "Pin conversation", about: "Keep this conversation however long it is not used", chat: true, run: (_a, tab) => (chat(tab) ? store.pin(tab!, true) : undefined) },
 	{ name: "unpin", title: "Unpin conversation", about: "Let this conversation go when it has not been used for a while", chat: true, run: (_a, tab) => (chat(tab) ? store.pin(tab!, false) : undefined) },
 	{ name: "reset", title: "Start over", about: "Forget this conversation and start fresh", chat: true, run: menu("reset") },
@@ -77,11 +81,11 @@ export const COMMANDS: Command[] = [
 			if (!t) return;
 			const wanted = args.trim();
 			if (!wanted) return store.pickModel(t);
-			const models = await api.models().catch(() => [] as string[]);
+			const models = await apiFor(envOf(tab)).models().catch(() => [] as string[]);
 			const hit = models.find((m) => m === wanted) ?? (models.filter((m) => m.includes(wanted)).length === 1 ? models.find((m) => m.includes(wanted)) : undefined);
 			if (!hit) return store.flash(`No single model fits "${wanted}".`, "bad");
-			if (await store.attempt(() => api.setModel(t.agent, hit))) {
-				const info = store.agent(t.agent);
+			if (await store.attempt(() => apiFor(t.env).setModel(t.agent, hit))) {
+				const info = store.agent(t.env, t.agent);
 				if (info) info.model = hit;
 				t.note(`${t.agent} now uses ${hit}.`);
 				t.touch();
@@ -97,8 +101,8 @@ export const COMMANDS: Command[] = [
 			const level = args.trim().toLowerCase();
 			if (!level) return store.pickReasoning(t);
 			if (!REASONING.includes(level)) return store.flash(`Reasoning is one of ${REASONING.join(", ")}.`, "bad");
-			if (await store.attempt(() => api.setThinking(t.agent, level))) {
-				const info = store.agent(t.agent);
+			if (await store.attempt(() => apiFor(t.env).setThinking(t.agent, level))) {
+				const info = store.agent(t.env, t.agent);
 				if (info) info.thinking = level;
 				store.touch();
 			}
@@ -133,7 +137,7 @@ export const COMMANDS: Command[] = [
 	{
 		name: "status", title: "Status", about: "Running tasks and live sessions",
 		run: async (_a, tab) => {
-			const s = await store.attempt(() => api.status());
+			const s = await store.attempt(() => apiFor(envOf(tab)).status());
 			if (!s || !tab) return;
 			tab.note(`${plural(s.running.length, "task")} running, ${plural(s.sessions.length, "live session")}, ${plural(s.approvals, "open question")}`, "muted", {
 				lines: [...s.running.map((r) => ({ text: `#${r.task} ${r.agent}/${r.session} (${r.kind})` })), ...s.sessions.map((x) => ({ text: `${x.agent}/${x.session} · ${x.busy ? "busy" : "idle"} · ${x.mode}${x.tainted ? ` · outside content: ${x.tainted}` : ""}` }))],
@@ -153,8 +157,8 @@ export const COMMANDS: Command[] = [
 			if (!source) return store.command("settings:events");
 			const note = words.join(" ") || undefined;
 			try {
-				if (scope === "global") await api.subscribeAll(source, { note });
-				else await api.subscribe(t.agent, source, { note, session: scope === "agent" ? "main" : t.session });
+				if (scope === "global") await apiFor(envOf(tab)).subscribeAll(source, { note });
+				else await apiFor(t.env).subscribe(t.agent, source, { note, session: scope === "agent" ? "main" : t.session });
 				t.note(scope === "global" ? `All agents are subscribed to ${source}.` : `${scope === "agent" || t.session === "main" ? `${t.agent} is` : "This conversation is"} subscribed to ${source}${scope === "local" && t.session !== "main" ? "; the subscription ends when this tab is closed" : ""}.`);
 			} catch (e) {
 				t.note(`Not subscribed: ${errText(e)}`, "bad");
@@ -172,7 +176,7 @@ export const COMMANDS: Command[] = [
 			const source = words.shift();
 			if (!source) return store.flash("Name the source: /unsubscribe [local|agent|global] <source>");
 			try {
-				const done = scope === "global" ? (await api.unsubscribeAll(source)).unsubscribed : (await api.unsubscribe(t.agent, source, scope === "agent" ? "main" : t.session)).unsubscribed;
+				const done = scope === "global" ? (await apiFor(envOf(tab)).unsubscribeAll(source)).unsubscribed : (await apiFor(t.env).unsubscribe(t.agent, source, scope === "agent" ? "main" : t.session)).unsubscribed;
 				t.note(done ? `No longer subscribed to ${source}.` : `There was no such subscription to ${source}.`);
 			} catch (e) {
 				t.note(`Not changed: ${errText(e)}`, "bad");
@@ -187,22 +191,22 @@ export const COMMANDS: Command[] = [
 		run: async (_a, tab) => {
 			const t = chat(tab);
 			if (!t) return;
-			const list = await store.attempt(() => api.tasks(t.agent, 15));
+			const list = await store.attempt(() => apiFor(t.env).tasks(t.agent, 15));
 			if (!list) return;
 			const id = await store.pick({ title: `Recent tasks of ${t.agent}`, items: list.map((x) => ({ value: String(x.id), label: `#${x.id} ${x.status}`, about: `${x.kind} · ${x.session} · ${short(oneLine(x.meta?.label ?? x.prompt), 80)}` })), placeholder: "Search tasks" });
-			if (id) await store.openTask(Number(id));
+			if (id) await store.openTask(t.env, Number(id));
 		},
 	},
-	{ name: "task", title: "Show one task", about: "What one task did, step by step (a sub-agent, for example)", hint: "<id>", run: (args) => (Number(args) > 0 ? store.openTask(Number(args)) : store.flash("Give the task's number: /task 12")) },
+	{ name: "task", title: "Show one task", about: "What one task did, step by step (a sub-agent, for example)", hint: "<id>", run: (args, tab) => (Number(args) > 0 ? store.openTask(envOf(tab), Number(args)) : store.flash("Give the task's number: /task 12")) },
 	{
 		name: "approve", title: "Allow what waits", about: "Allow the action that waits for approval", hint: "[id] [always]",
-		run: async (args) => answer(args, true),
+		run: async (args, tab) => answer(args, true, tab),
 	},
-	{ name: "deny", title: "Refuse what waits", about: "Refuse the action that waits for approval", hint: "[id]", run: async (args) => answer(args, false) },
+	{ name: "deny", title: "Refuse what waits", about: "Refuse the action that waits for approval", hint: "[id]", run: async (args, tab) => answer(args, false, tab) },
 	{
 		name: "state", title: "Shared state", about: "The small facts agents and routes share", hint: "[key pattern]",
 		run: async (args, tab) => {
-			const list = await store.attempt(() => api.state(args.trim() || "#"));
+			const list = await store.attempt(() => apiFor(envOf(tab)).state(args.trim() || "#"));
 			if (!list || !tab) return;
 			tab.note(list.length ? `Shared state (${list.length})` : "No shared state matches.", "muted", { lines: list.slice(0, 60).map((s) => ({ text: `${s.key} = ${short(JSON.stringify(s.value), 160)}` })) });
 			tab.touch();
@@ -210,7 +214,7 @@ export const COMMANDS: Command[] = [
 	},
 	{
 		name: "emit", title: "Publish an event", about: "Publish an event as yourself", hint: "<topic> [json]",
-		run: async (args) => {
+		run: async (args, tab) => {
 			const at = args.trim().indexOf(" ");
 			const topic = at < 0 ? args.trim() : args.trim().slice(0, at);
 			if (!topic) return store.flash("Name the topic: /emit <topic> [json]");
@@ -222,7 +226,7 @@ export const COMMANDS: Command[] = [
 					return store.flash("The payload is not JSON.", "bad");
 				}
 			}
-			const done = await store.attempt(() => api.emit(topic, payload));
+			const done = await store.attempt(() => apiFor(envOf(tab)).emit(topic, payload));
 			if (done) store.flash(`Published event #${done.id} on ${topic}.`);
 		},
 	},
@@ -256,17 +260,18 @@ export const COMMANDS: Command[] = [
 	{ name: "help", title: "Keys and commands", about: "What can be typed and pressed", run: menu("help") },
 ];
 
-async function answer(args: string, allow: boolean): Promise<void> {
+async function answer(args: string, allow: boolean, tab: Tab | undefined): Promise<void> {
+	const env = envOf(tab);
 	const words = args.split(/\s+/).filter(Boolean);
 	const always = allow && words.includes("always");
 	const id = words.find((w) => w !== "always") ?? "";
-	const pending = await api.approvals().catch(() => []);
+	const pending = await apiFor(env).approvals().catch(() => []);
 	const target = id || (pending.length === 1 ? pending[0].id : "");
 	if (!target) return store.flash(pending.length ? `Several requests wait: ${pending.map((p) => p.id).join(", ")}` : "Nothing waits for approval.");
 	const req = pending.find((p) => p.id === target);
 	// One that needs a value, or is a question, is answered in its dialog.
-	if (allow && (req?.inputs?.length || req?.tool === "question")) return store.ask(target);
-	await store.decide(target, allow, always);
+	if (allow && (req?.inputs?.length || req?.tool === "question")) return store.ask(env, target);
+	await store.decide(env, target, allow, always);
 }
 
 /** Run what was typed after a slash. */

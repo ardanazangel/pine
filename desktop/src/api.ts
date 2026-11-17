@@ -12,14 +12,6 @@ export class ApiError extends Error {
 	}
 }
 
-async function call<T>(method: "GET" | "POST", url: string, body?: unknown): Promise<T> {
-	const r = await bridge.call(method, url, body);
-	if (!r.ok) throw new ApiError(r.status, r.data);
-	return r.data as T;
-}
-
-const get = <T>(url: string) => call<T>("GET", url);
-const post = <T>(url: string, body: unknown = {}) => call<T>("POST", url, body);
 const e = encodeURIComponent;
 const qs = (o: Record<string, string | number | undefined>) => {
 	const parts = Object.entries(o).filter(([, v]) => v !== undefined && v !== "");
@@ -316,111 +308,132 @@ export interface Status {
 const a = (agent: string) => `/agents/${e(agent)}`;
 const s = (session: string) => `?session=${e(session)}`;
 
-export const api = {
-	get,
-	post,
-	agents: () => get<AgentInfo[]>("/agents"),
-	status: () => get<Status>("/status"),
-	models: () => get<string[]>("/models"),
-	sessions: (agent: string) => get<Conversation[]>(`${a(agent)}/sessions`),
-	removeSession: (agent: string, session: string) => post<{ removed: boolean; unsubscribed: string[]; sources: string[]; servers: string[] }>(`${a(agent)}/remove`, { session }),
-	renameSession: (agent: string, session: string, to: string) => post<{ session: string }>(`${a(agent)}/rename`, { session, to }),
-	pinSession: (agent: string, session: string, pinned: boolean) => post<{ pinned: boolean }>(`${a(agent)}/pin`, { session, pinned }),
-	closeSession: (agent: string, session: string) => post<{ unsubscribed: string[] }>(`${a(agent)}/close`, { session }),
-	folder: (agent: string, session: string) => get<{ folder?: string; workspace: string }>(`${a(agent)}/folder${s(session)}`),
-	folders: (agent: string) => get<Array<{ session: string; folder: string }>>(`${a(agent)}/folders`),
-	setFolder: (agent: string, session: string, folder: string | null) => post<{ folder?: string }>(`${a(agent)}/folder`, { session, folder }),
-	programs: (agent: string, session: string) => get<Program[]>(`${a(agent)}/programs${s(session)}`),
-	/** The browser of a conversation, for the panel beside it: where it is, what the owner does in it, an address the owner opens. */
-	browser: (agent: string, session: string) => get<BrowserState>(`${a(agent)}/browser${s(session)}`),
-	browserInput: (agent: string, session: string, ops: unknown[]) => post<BrowserState>(`${a(agent)}/browser/input`, { session, ops }),
-	browserOpen: (agent: string, session: string, url: string) => post<BrowserState>(`${a(agent)}/browser/open`, { session, url }),
-	/** This app shows the browser itself: said again and again, so that the agent's browser opens no window of its own. */
-	browserEmbedded: () => post<{ ok: boolean }>("/browser/embedded"),
-	stopProgram: (agent: string, session: string, id: number) => post<{ stopped: boolean }>(`${a(agent)}/programs/stop`, { session, id }),
-	goal: (agent: string, session: string) => get<{ goal?: GoalInfo }>(`${a(agent)}/goal${s(session)}`),
-	setGoal: (agent: string, session: string, what: { objective: string } | { action: "pause" | "resume" | "clear" }) => post<{ goal?: GoalInfo; cleared?: boolean }>(`${a(agent)}/goal`, { session, ...what }),
-	todos: (agent: string, session: string) => get<Todo[]>(`${a(agent)}/todos${s(session)}`),
-	history: (agent: string, session: string, limit = 40) => get<Task[]>(`/tasks${qs({ agent, session, limit })}`),
-	tasks: (agent?: string, limit = 50) => get<Task[]>(`/tasks${qs({ agent, limit })}`),
-	prompt: (agent: string, prompt: string, session: string, attachments?: Array<{ name: string; data: string }>, whenBusy: "steer" | "queue" = "steer", mentions?: string[]) => post<{ task: number; steered?: number }>(`${a(agent)}/prompt`, { prompt, session, wait: false, attachments, whenBusy, mentions }),
-	transcript: (task: number, full = false) => get<{ task: Task; entries: TranscriptEntry[] }>(`/tasks/${task}/transcript${full ? "?full=1" : ""}`),
-	cancel: (task: number) => post<{ cancelled: boolean }>(`/tasks/${task}/cancel`),
-	reset: (agent: string, session: string) => post<{ reset: boolean }>(`${a(agent)}/reset`, { session }),
-	compact: (agent: string, session: string) => post<{ task: number }>(`${a(agent)}/compact`, { session }),
-	undo: (agent: string, session: string) => post<UndoResult>(`${a(agent)}/undo`, { session }),
-	redo: (agent: string, session: string) => post<UndoResult>(`${a(agent)}/redo`, { session }),
-	setThinking: (agent: string, level: string) => post<{ level: string }>(`${a(agent)}/thinking`, { level }),
-	setMode: (agent: string, mode: string, anyway?: string) => post<{ mode: string }>(`${a(agent)}/mode`, { mode, session: anyway, anyway: anyway !== undefined }),
-	setModel: (agent: string, model: string) => post<{ model: string }>(`${a(agent)}/model`, { model }),
-	approvals: () => get<Approval[]>("/approvals"),
-	decide: (id: string, allow: boolean, always = false, values?: Record<string, string>) => post<{ decided: boolean }>(`/approvals/${e(id)}`, { allow, always, values }),
-	tabs: () => get<{ tabs: Array<{ agent: string; session: string }>; active: number; code?: boolean; notify?: boolean }>("/ui/tabs"),
-	saveTabs: (tabs: Array<{ agent: string; session: string }>, active: number, code: boolean) => post<{ ok: boolean }>("/ui/tabs", { tabs, active, code }),
-	events: (topic?: string, limit = 200) => get<PineEvent[]>(`/events${qs({ topic, limit })}`),
-	emit: (topic: string, payload: unknown) => post<{ id: number }>("/events", { topic, payload }),
-	state: (pattern = "#") => get<Array<{ key: string; value: unknown; ts?: number; source?: string }>>(`/state?key=${e(pattern)}`),
-	setState: (key: string, value: unknown) => post<{ ok: boolean }>("/state", { key, value }),
+/**
+ * The control API of one environment's pine. Each environment is a daemon of its own, with its
+ * agents, tasks and numbers: what is asked always says of which.
+ */
+function makeApi(env: string) {
+	const call = async <T>(method: "GET" | "POST", url: string, body?: unknown): Promise<T> => {
+		const r = await bridge.call(env, method, url, body);
+		if (!r.ok) throw new ApiError(r.status, r.data);
+		return r.data as T;
+	};
+	const get = <T>(url: string) => call<T>("GET", url);
+	const post = <T>(url: string, body: unknown = {}) => call<T>("POST", url, body);
+	return {
+		get,
+		post,
+		agents: () => get<AgentInfo[]>("/agents"),
+		status: () => get<Status>("/status"),
+		models: () => get<string[]>("/models"),
+		sessions: (agent: string) => get<Conversation[]>(`${a(agent)}/sessions`),
+		removeSession: (agent: string, session: string) => post<{ removed: boolean; unsubscribed: string[]; sources: string[]; servers: string[] }>(`${a(agent)}/remove`, { session }),
+		renameSession: (agent: string, session: string, to: string) => post<{ session: string }>(`${a(agent)}/rename`, { session, to }),
+		pinSession: (agent: string, session: string, pinned: boolean) => post<{ pinned: boolean }>(`${a(agent)}/pin`, { session, pinned }),
+		closeSession: (agent: string, session: string) => post<{ unsubscribed: string[] }>(`${a(agent)}/close`, { session }),
+		folder: (agent: string, session: string) => get<{ folder?: string; workspace: string }>(`${a(agent)}/folder${s(session)}`),
+		folders: (agent: string) => get<Array<{ session: string; folder: string }>>(`${a(agent)}/folders`),
+		setFolder: (agent: string, session: string, folder: string | null) => post<{ folder?: string }>(`${a(agent)}/folder`, { session, folder }),
+		programs: (agent: string, session: string) => get<Program[]>(`${a(agent)}/programs${s(session)}`),
+		/** The browser of a conversation, for the panel beside it: where it is, what the owner does in it, an address the owner opens. */
+		browser: (agent: string, session: string) => get<BrowserState>(`${a(agent)}/browser${s(session)}`),
+		browserInput: (agent: string, session: string, ops: unknown[]) => post<BrowserState>(`${a(agent)}/browser/input`, { session, ops }),
+		browserOpen: (agent: string, session: string, url: string) => post<BrowserState>(`${a(agent)}/browser/open`, { session, url }),
+		/** This app shows the browser itself: said again and again, so that the agent's browser opens no window of its own. */
+		browserEmbedded: () => post<{ ok: boolean }>("/browser/embedded"),
+		stopProgram: (agent: string, session: string, id: number) => post<{ stopped: boolean }>(`${a(agent)}/programs/stop`, { session, id }),
+		goal: (agent: string, session: string) => get<{ goal?: GoalInfo }>(`${a(agent)}/goal${s(session)}`),
+		setGoal: (agent: string, session: string, what: { objective: string } | { action: "pause" | "resume" | "clear" }) => post<{ goal?: GoalInfo; cleared?: boolean }>(`${a(agent)}/goal`, { session, ...what }),
+		todos: (agent: string, session: string) => get<Todo[]>(`${a(agent)}/todos${s(session)}`),
+		history: (agent: string, session: string, limit = 40) => get<Task[]>(`/tasks${qs({ agent, session, limit })}`),
+		tasks: (agent?: string, limit = 50) => get<Task[]>(`/tasks${qs({ agent, limit })}`),
+		prompt: (agent: string, prompt: string, session: string, attachments?: Array<{ name: string; data: string }>, whenBusy: "steer" | "queue" = "steer", mentions?: string[]) => post<{ task: number; steered?: number }>(`${a(agent)}/prompt`, { prompt, session, wait: false, attachments, whenBusy, mentions }),
+		transcript: (task: number, full = false) => get<{ task: Task; entries: TranscriptEntry[] }>(`/tasks/${task}/transcript${full ? "?full=1" : ""}`),
+		cancel: (task: number) => post<{ cancelled: boolean }>(`/tasks/${task}/cancel`),
+		reset: (agent: string, session: string) => post<{ reset: boolean }>(`${a(agent)}/reset`, { session }),
+		compact: (agent: string, session: string) => post<{ task: number }>(`${a(agent)}/compact`, { session }),
+		undo: (agent: string, session: string) => post<UndoResult>(`${a(agent)}/undo`, { session }),
+		redo: (agent: string, session: string) => post<UndoResult>(`${a(agent)}/redo`, { session }),
+		setThinking: (agent: string, level: string) => post<{ level: string }>(`${a(agent)}/thinking`, { level }),
+		setMode: (agent: string, mode: string, anyway?: string) => post<{ mode: string }>(`${a(agent)}/mode`, { mode, session: anyway, anyway: anyway !== undefined }),
+		setModel: (agent: string, model: string) => post<{ model: string }>(`${a(agent)}/model`, { model }),
+		approvals: () => get<Approval[]>("/approvals"),
+		decide: (id: string, allow: boolean, always = false, values?: Record<string, string>) => post<{ decided: boolean }>(`/approvals/${e(id)}`, { allow, always, values }),
+		tabs: () => get<{ tabs: Array<{ agent: string; session: string }>; active: number; code?: boolean; notify?: boolean }>("/ui/tabs"),
+		saveTabs: (tabs: Array<{ agent: string; session: string }>, active: number, code: boolean) => post<{ ok: boolean }>("/ui/tabs", { tabs, active, code }),
+		events: (topic?: string, limit = 200) => get<PineEvent[]>(`/events${qs({ topic, limit })}`),
+		emit: (topic: string, payload: unknown) => post<{ id: number }>("/events", { topic, payload }),
+		state: (pattern = "#") => get<Array<{ key: string; value: unknown; ts?: number; source?: string }>>(`/state?key=${e(pattern)}`),
+		setState: (key: string, value: unknown) => post<{ ok: boolean }>("/state", { key, value }),
 
-	// the folder a conversation works in
-	changes: (agent: string, session: string) => get<{ root: string; repo: boolean; branch?: string; files: Change[]; more: boolean }>(`${a(agent)}/view/changes${s(session)}`),
-	diff: (agent: string, session: string, file: string) => get<{ diff: string; truncated: boolean }>(`${a(agent)}/view/diff${s(session)}&path=${e(file)}`),
-	tree: (agent: string, session: string, dir: string) => get<{ entries: Array<{ name: string; dir: boolean; size: number }>; more: boolean }>(`${a(agent)}/view/tree${s(session)}&path=${e(dir)}`),
-	file: (agent: string, session: string, file: string) => get<{ text?: string; size: number; binary: boolean; truncated: boolean }>(`${a(agent)}/view/file${s(session)}&path=${e(file)}&max=2000000`),
-	writeFile: (agent: string, session: string, file: string, text: string) => post<{ size: number }>(`${a(agent)}/view/write`, { session, path: file, text }),
-	find: (agent: string, session: string, q: string) => get<{ files: string[] }>(`${a(agent)}/view/find${s(session)}&q=${e(q)}`),
-	turn: (agent: string, session: string) => get<{ task?: number; prompt?: string; root?: string; files: Change[]; more: boolean; note?: string }>(`${a(agent)}/view/turn${s(session)}`),
-	turnDiff: (agent: string, session: string, file: string) => get<{ diff: string; truncated: boolean }>(`${a(agent)}/view/turndiff${s(session)}&path=${e(file)}`),
-	fetchImage: (url: string) => post<{ mime: string; base64: string }>("/images/fetch", { url }),
+		// the folder a conversation works in
+		changes: (agent: string, session: string) => get<{ root: string; repo: boolean; branch?: string; files: Change[]; more: boolean }>(`${a(agent)}/view/changes${s(session)}`),
+		diff: (agent: string, session: string, file: string) => get<{ diff: string; truncated: boolean }>(`${a(agent)}/view/diff${s(session)}&path=${e(file)}`),
+		tree: (agent: string, session: string, dir: string) => get<{ entries: Array<{ name: string; dir: boolean; size: number }>; more: boolean }>(`${a(agent)}/view/tree${s(session)}&path=${e(dir)}`),
+		file: (agent: string, session: string, file: string) => get<{ text?: string; size: number; binary: boolean; truncated: boolean }>(`${a(agent)}/view/file${s(session)}&path=${e(file)}&max=2000000`),
+		writeFile: (agent: string, session: string, file: string, text: string) => post<{ size: number }>(`${a(agent)}/view/write`, { session, path: file, text }),
+		find: (agent: string, session: string, q: string) => get<{ files: string[] }>(`${a(agent)}/view/find${s(session)}&q=${e(q)}`),
+		turn: (agent: string, session: string) => get<{ task?: number; prompt?: string; root?: string; files: Change[]; more: boolean; note?: string }>(`${a(agent)}/view/turn${s(session)}`),
+		turnDiff: (agent: string, session: string, file: string) => get<{ diff: string; truncated: boolean }>(`${a(agent)}/view/turndiff${s(session)}&path=${e(file)}`),
+		fetchImage: (url: string) => post<{ mime: string; base64: string }>("/images/fetch", { url }),
 
-	// sources and subscriptions
-	sources: () => get<SourceInfo[]>("/sources"),
-	/** The sources one agent can listen to, and how a conversation of it does: on its own, as the agent, with all agents. */
-	agentSources: (agent: string, session: string) => get<Array<{ name: string; type: string; description?: string; local?: { note?: string }; agent?: { note?: string; session?: string }; global?: { note?: string }; elsewhere: string[] }>>(`${a(agent)}/sources${s(session)}`),
-	sourceTypes: () => get<SourceType[]>("/sources/types"),
-	proposeSource: (body: { name: string; type: string; options: Record<string, unknown>; agent?: string }) => post<{ does: string[]; opens: boolean; needs: Array<{ name: string; label: string }>; owner?: boolean; tell?: string }>("/sources/propose", body),
-	addSource: (body: { name: string; type: string; description: string; options: Record<string, unknown>; agent?: string; own?: boolean; values?: Record<string, string> }) => post<{ name: string; type: string; tell?: string }>("/sources", body),
-	removeSource: (name: string, agent?: string) => post<{ removed: boolean; unsubscribed: string[] }>("/sources/remove", { name, agent }),
-	subscribe: (agent: string, source: string, details: Record<string, unknown> = {}) => post<any>(`${a(agent)}/subscribe`, { source, ...details }),
-	unsubscribe: (agent: string, source: string, session?: string) => post<{ unsubscribed: boolean; sessions: string[] }>(`${a(agent)}/unsubscribe`, { source, session }),
-	subscribeAll: (source: string, details: Record<string, unknown> = {}) => post<any>("/subscribe", { source, ...details }),
-	unsubscribeAll: (source: string) => post<{ unsubscribed: boolean }>("/unsubscribe", { source }),
-	schedules: () => get<Schedule[]>("/schedules"),
-	addSchedule: (body: { name: string; task: string; cron?: string; every?: string; at?: string; agent?: string; session?: string }) => post<Schedule>("/schedules", body),
-	removeSchedule: (name: string, agent?: string) => post<{ removed: boolean }>("/schedules/remove", { name, agent }),
-	routes: () => get<Route[]>("/routes"),
-	addRoute: (body: Record<string, string | undefined>) => post<{ name: string; lines: string[]; wider?: string }>("/routes", body),
-	removeRoute: (name: string) => post<{ removed: boolean }>("/routes/remove", { name }),
+		// sources and subscriptions
+		sources: () => get<SourceInfo[]>("/sources"),
+		/** The sources one agent can listen to, and how a conversation of it does: on its own, as the agent, with all agents. */
+		agentSources: (agent: string, session: string) => get<Array<{ name: string; type: string; description?: string; local?: { note?: string }; agent?: { note?: string; session?: string }; global?: { note?: string }; elsewhere: string[] }>>(`${a(agent)}/sources${s(session)}`),
+		sourceTypes: () => get<SourceType[]>("/sources/types"),
+		proposeSource: (body: { name: string; type: string; options: Record<string, unknown>; agent?: string }) => post<{ does: string[]; opens: boolean; needs: Array<{ name: string; label: string }>; owner?: boolean; tell?: string }>("/sources/propose", body),
+		addSource: (body: { name: string; type: string; description: string; options: Record<string, unknown>; agent?: string; own?: boolean; values?: Record<string, string> }) => post<{ name: string; type: string; tell?: string }>("/sources", body),
+		removeSource: (name: string, agent?: string) => post<{ removed: boolean; unsubscribed: string[] }>("/sources/remove", { name, agent }),
+		subscribe: (agent: string, source: string, details: Record<string, unknown> = {}) => post<any>(`${a(agent)}/subscribe`, { source, ...details }),
+		unsubscribe: (agent: string, source: string, session?: string) => post<{ unsubscribed: boolean; sessions: string[] }>(`${a(agent)}/unsubscribe`, { source, session }),
+		subscribeAll: (source: string, details: Record<string, unknown> = {}) => post<any>("/subscribe", { source, ...details }),
+		unsubscribeAll: (source: string) => post<{ unsubscribed: boolean }>("/unsubscribe", { source }),
+		schedules: () => get<Schedule[]>("/schedules"),
+		addSchedule: (body: { name: string; task: string; cron?: string; every?: string; at?: string; agent?: string; session?: string }) => post<Schedule>("/schedules", body),
+		removeSchedule: (name: string, agent?: string) => post<{ removed: boolean }>("/schedules/remove", { name, agent }),
+		routes: () => get<Route[]>("/routes"),
+		addRoute: (body: Record<string, string | undefined>) => post<{ name: string; lines: string[]; wider?: string }>("/routes", body),
+		removeRoute: (name: string) => post<{ removed: boolean }>("/routes/remove", { name }),
 
-	// what the settings pages change
-	overview: () => get<Overview>("/overview"),
-	settings: () => get<Setting[]>("/settings"),
-	setSetting: (key: string, value: unknown) => post<{ key: string; now: string; live: boolean }>("/settings", { key, value }),
-	agentDetail: (agent: string) => get<AgentDetail>(`${a(agent)}/detail`),
-	createAgent: (body: { id: string; description: string; instructions: string; model?: string; tools?: string[] }) => post<{ id: string; workspace: string }>("/agents", body),
-	updateAgent: (agent: string, change: Record<string, unknown>) => post<{ lines: string[]; warnings: string[] }>(`${a(agent)}/update`, change),
-	eraseAgent: (agent: string, keepFiles: boolean) => post<{ kept?: string; problem?: string }>(`${a(agent)}/erase`, { agent, keepFiles }),
-	shared: () => get<Array<{ name: string; about: string; text: string }>>("/shared"),
-	setShared: (name: string, text: string) => post<{ ok: boolean }>("/shared", { name, text }),
-	skills: () => get<Skill[]>("/skills"),
-	addSkill: (body: { name: string; description: string; instructions: string; agent?: string }) => post<{ name: string; dir: string; replaced: boolean }>("/skills", body),
-	removeSkill: (name: string, agent?: string, session?: string) => post<{ removed: boolean }>("/skills/remove", { name, agent, session }),
-	mcp: () => get<McpServer[]>("/mcp"),
-	mcpStates: () => get<Record<string, string>>("/mcp/states"),
-	addMcp: (name: string, server: Record<string, unknown>, agent?: string) => post<{ ok: boolean }>("/mcp", { name, server, agent }),
-	removeMcp: (name: string, agent?: string) => post<{ ok: boolean }>("/mcp", { name, agent, remove: true }),
-	mcpLogin: (name: string, agent?: string) => post<{ code: number; out: string }>("/mcp/login", { name, agent }),
-	modelServers: () => get<ModelServer[]>("/models/servers"),
-	addModelServer: (body: { name: string; url: string; key?: string; context?: number }) => post<{ models: string[] }>("/models/servers", body),
-	removeModelServer: (name: string) => post<{ removed: boolean }>("/models/servers/remove", { name }),
-	providers: () => get<Provider[]>("/models/providers"),
-	login: (provider: string, type?: "api_key" | "oauth") => post<{ id: string }>("/models/login", { provider, type }),
-	loginState: (id: string) => get<LoginState>(`/models/login/${e(id)}`),
-	loginAnswer: (id: string, body: { answer: string } | { cancel: true }) => post<{ ok: boolean }>(`/models/login/${e(id)}`, body),
-	logout: (provider: string) => post<{ ok: boolean }>("/models/logout", { provider }),
-};
+		// what the settings pages change
+		overview: () => get<Overview>("/overview"),
+		settings: () => get<Setting[]>("/settings"),
+		setSetting: (key: string, value: unknown) => post<{ key: string; now: string; live: boolean }>("/settings", { key, value }),
+		agentDetail: (agent: string) => get<AgentDetail>(`${a(agent)}/detail`),
+		createAgent: (body: { id: string; description: string; instructions: string; model?: string; tools?: string[] }) => post<{ id: string; workspace: string }>("/agents", body),
+		updateAgent: (agent: string, change: Record<string, unknown>) => post<{ lines: string[]; warnings: string[] }>(`${a(agent)}/update`, change),
+		eraseAgent: (agent: string, keepFiles: boolean) => post<{ kept?: string; problem?: string }>(`${a(agent)}/erase`, { agent, keepFiles }),
+		shared: () => get<Array<{ name: string; about: string; text: string }>>("/shared"),
+		setShared: (name: string, text: string) => post<{ ok: boolean }>("/shared", { name, text }),
+		skills: () => get<Skill[]>("/skills"),
+		addSkill: (body: { name: string; description: string; instructions: string; agent?: string }) => post<{ name: string; dir: string; replaced: boolean }>("/skills", body),
+		removeSkill: (name: string, agent?: string, session?: string) => post<{ removed: boolean }>("/skills/remove", { name, agent, session }),
+		mcp: () => get<McpServer[]>("/mcp"),
+		mcpStates: () => get<Record<string, string>>("/mcp/states"),
+		addMcp: (name: string, server: Record<string, unknown>, agent?: string) => post<{ ok: boolean }>("/mcp", { name, server, agent }),
+		removeMcp: (name: string, agent?: string) => post<{ ok: boolean }>("/mcp", { name, agent, remove: true }),
+		mcpLogin: (name: string, agent?: string) => post<{ code: number; out: string }>("/mcp/login", { name, agent }),
+		modelServers: () => get<ModelServer[]>("/models/servers"),
+		addModelServer: (body: { name: string; url: string; key?: string; context?: number }) => post<{ models: string[] }>("/models/servers", body),
+		removeModelServer: (name: string) => post<{ removed: boolean }>("/models/servers/remove", { name }),
+		providers: () => get<Provider[]>("/models/providers"),
+		login: (provider: string, type?: "api_key" | "oauth") => post<{ id: string }>("/models/login", { provider, type }),
+		loginState: (id: string) => get<LoginState>(`/models/login/${e(id)}`),
+		loginAnswer: (id: string, body: { answer: string } | { cancel: true }) => post<{ ok: boolean }>(`/models/login/${e(id)}`, body),
+		logout: (provider: string) => post<{ ok: boolean }>("/models/logout", { provider }),
+	};
+}
 
-/** Addresses of pictures, videos and sounds the daemon serves. The main process adds the token. */
+export type Api = ReturnType<typeof makeApi>;
+
+const apis = new Map<string, Api>();
+export function apiFor(env: string): Api {
+	let api = apis.get(env);
+	if (!api) apis.set(env, (api = makeApi(env)));
+	return api;
+}
+
 /** Where a conversation's browser is. `open`: a page is open and there is a picture of it. */
 export interface BrowserState {
 	open: boolean;
@@ -431,10 +444,11 @@ export interface BrowserState {
 	error?: string;
 }
 
+/** Addresses of pictures, videos and sounds an environment's daemon serves. The main process adds the token. */
 export const media = {
 	/** The page of a conversation's browser as a picture; `n` only makes each address a new one. */
-	browser: (agent: string, session: string, n: number) => `pine-media://daemon${a(agent)}/browser/frame?session=${e(session)}&n=${n}`,
-	tool: (id: string) => `pine-media://daemon/media/tool/${e(id)}`,
-	task: (task: number, n: number) => `pine-media://daemon/tasks/${task}/images/${n}`,
-	workspace: (agent: string, file: string, session?: string) => `pine-media://daemon${a(agent)}/image?path=${e(file)}${session ? `&session=${e(session)}` : ""}`,
+	browser: (env: string, agent: string, session: string, n: number) => `pine-media://${env}${a(agent)}/browser/frame?session=${e(session)}&n=${n}`,
+	tool: (env: string, id: string) => `pine-media://${env}/media/tool/${e(id)}`,
+	task: (env: string, task: number, n: number) => `pine-media://${env}/tasks/${task}/images/${n}`,
+	workspace: (env: string, agent: string, file: string, session?: string) => `pine-media://${env}${a(agent)}/image?path=${e(file)}${session ? `&session=${e(session)}` : ""}`,
 };

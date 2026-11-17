@@ -243,6 +243,20 @@ html:not([data-platform="darwin"]) .side-top {
 .side-group {
 	margin-bottom: 4px;
 }
+/* How an environment's pine is, under its name, while it is not simply there. */
+.side-env-note {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-height: 28px;
+	padding: 2px 6px 2px 8px;
+	font-size: 12px;
+	color: var(--muted);
+	-webkit-app-region: no-drag;
+}
+.side-env-note.bad {
+	color: var(--bad);
+}
 .side-agent {
 	display: flex;
 	align-items: center;
@@ -493,6 +507,9 @@ html:not([data-platform="darwin"]) .app.no-sidebar .titlebar {
 }
 .tab .name b {
 	font-weight: 550;
+}
+.tab .name .where {
+	color: var(--faint);
 }
 .tab .close {
 	width: 18px;
@@ -2509,6 +2526,13 @@ select.input {
 }
 .set-nav .side-row {
 	height: 32px;
+}
+.set-env {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 0 4px 12px;
+	font-size: 11.5px;
 }
 .set-page {
 	flex: 1;

@@ -11,15 +11,19 @@ const on = (channel: string) => (fn: (...args: any[]) => void) => {
 const bridge = {
 	state: () => ipcRenderer.invoke("pine:state"),
 	ready: () => ipcRenderer.send("pine:ready"),
-	call: (method: "GET" | "POST", url: string, body?: unknown) => ipcRenderer.invoke("pine:call", method, url, body),
-	retry: () => ipcRenderer.invoke("pine:retry"),
+	/** One call of the control API of an environment's pine. */
+	call: (env: string, method: "GET" | "POST", url: string, body?: unknown) => ipcRenderer.invoke("pine:call", env, method, url, body),
+	retry: (env: string) => ipcRenderer.invoke("pine:retry", env),
 	/** Whether there is a newer app: what the start found, or with `again` what GitHub says now. Nothing where nobody is asked. */
 	update: (again?: boolean) => ipcRenderer.invoke("pine:update", again),
-	restart: () => ipcRenderer.invoke("pine:restart"),
+	restart: (env: string) => ipcRenderer.invoke("pine:restart", env),
 	init: () => ipcRenderer.invoke("pine:init"),
 	/** Fetch the browser build this pine drives (`pine browser-install`); what it prints comes as init lines. */
 	browserInstall: () => ipcRenderer.invoke("pine:browser"),
 	prefs: (change: Record<string, unknown>) => ipcRenderer.invoke("pine:prefs", change),
+	addEnvironment: (host: string) => ipcRenderer.invoke("pine:env-add", host),
+	enableEnvironment: (env: string, on: boolean) => ipcRenderer.invoke("pine:env-enable", env, on),
+	forgetEnvironment: (env: string) => ipcRenderer.invoke("pine:env-forget", env),
 	pickFolder: (title?: string) => ipcRenderer.invoke("pine:pick-folder", title),
 	saveText: (name: string, text: string) => ipcRenderer.invoke("pine:save-text", name, text),
 	open: (url: string) => ipcRenderer.invoke("pine:open", url),
@@ -34,6 +38,7 @@ const bridge = {
 	/** Where a file that was dropped on the window lies: a folder is opened by its path, not read. */
 	pathOf: (file: File) => webUtils.getPathForFile(file),
 	onService: on("pine:service"),
+	onEnvironments: on("pine:environments"),
 	onEvents: on("pine:events"),
 	onConnection: on("pine:connection"),
 	onMenu: on("pine:menu"),

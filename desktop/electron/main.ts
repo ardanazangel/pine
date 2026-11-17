@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildVoice, Listening, NOT_HERE } from "../../src/tui/voice.ts";
 import { type Command, install, look, remove, said } from "./command.ts";
-import { connect, findPine, type Launch, loginEnv, pineRoot, runPine, type Service, ServiceError } from "./service.ts";
+import { connect, connectRemote, type Environment, environmentId, findPine, type Launch, LOCAL, loginEnv, pineRoot, readEnvironments, remoteHost, runPine, type Service, ServiceError } from "./service.ts";
 import { LATEST, lookForUpdate, type Update } from "./updates.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -41,6 +41,8 @@ interface Prefs {
 	home?: string;
 	/** A daemon this app started goes on when the app quits. */
 	keepRunning: boolean;
+	/** This computer and the machines added over SSH, each on (connected and shown) or off. */
+	environments: Environment[];
 	theme: "system" | "light" | "dark";
 	notify: boolean;
 	/** Whether GitHub is asked for a newer app when this one starts. */
@@ -51,7 +53,7 @@ interface Prefs {
 }
 
 const prefsFile = () => path.join(app.getPath("userData"), "prefs.json");
-let prefs: Prefs = { keepRunning: false, theme: "system", notify: true, updates: true, commandTried: false };
+let prefs: Prefs = { keepRunning: false, environments: readEnvironments({}), theme: "system", notify: true, updates: true, commandTried: false };
 
 function loadPrefs(): void {
 	try {
@@ -59,6 +61,7 @@ function loadPrefs(): void {
 		prefs = {
 			home: typeof raw.home === "string" && raw.home ? raw.home : undefined,
 			keepRunning: raw.keepRunning === true,
+			environments: readEnvironments(raw),
 			theme: raw.theme === "light" || raw.theme === "dark" ? raw.theme : "system",
 			notify: raw.notify !== false,
 			updates: raw.updates !== false,
@@ -80,15 +83,28 @@ function savePrefs(): void {
 	}
 }
 
-// ---- the daemon --------------------------------------------------------------------------------
+const shownPrefs = () => ({ ...prefs, bounds: undefined });
 
-type ServiceState = { status: "starting" } | { status: "ready"; mode: string; started: boolean; home: string; version?: string; from: string } | { status: "error"; kind: ServiceError["kind"]; message: string };
+// ---- the daemons: one for each environment that is on ------------------------------------------------
+//
+// Each has its own connection: its service (address and token), its stream of events, its
+// retries and its state. One that fails or is slow holds up none of the others.
+
+type ServiceState = { status: "starting" } | { status: "ready"; mode: string; started: boolean; home: string; version?: string; from: string; remote?: string } | { status: "error"; kind: ServiceError["kind"]; message: string };
+
+interface Connection {
+	env: Environment;
+	service?: Service;
+	state: ServiceState;
+	connected: boolean;
+	stream?: AbortController;
+	/** Counts up with each start, so that a start that was overtaken lets go of what it found. */
+	round: number;
+}
 
 let win: BrowserWindow | undefined;
-let service: Service | undefined;
+const connections = new Map<string, Connection>();
 let launch: Launch | undefined;
-let state: ServiceState = { status: "starting" };
-let stream: AbortController | undefined;
 let quitting = false;
 let listening: Listening | undefined;
 
@@ -96,38 +112,107 @@ const send = (channel: string, ...args: unknown[]) => {
 	if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
 };
 
-function setState(next: ServiceState): void {
-	state = next;
-	send("pine:service", state);
+/** What the page is told of an environment: what it is, whether it is on, how its pine is. */
+const viewOf = (env: Environment) => {
+	const c = connections.get(env.id);
+	return { id: env.id, host: env.host, label: env.host ? remoteHost(env.host)!.label : "This Mac", enabled: env.enabled, state: c?.state ?? ({ status: "starting" } as ServiceState), connected: c?.connected ?? false };
+};
+const views = () => prefs.environments.map(viewOf);
+
+function setState(c: Connection, next: ServiceState): void {
+	c.state = next;
+	send("pine:service", c.env.id, next);
 }
 
-async function startService(): Promise<void> {
-	stream?.abort();
-	setState({ status: "starting" });
+const findLaunch = async () => (launch ??= await findPine(APP_ROOT, app.isPackaged ? process.resourcesPath : undefined));
+
+/** Let go of a service: an SSH forward is closed; a pine this app started here stops, unless it is to go on. */
+async function release(s: Service | undefined): Promise<void> {
+	if (s?.remote) await s.stop();
+	else if (s?.started && !prefs.keepRunning) await s.stop();
+}
+
+async function start(c: Connection): Promise<void> {
+	c.stream?.abort();
+	const round = ++c.round;
+	// The port forward of a pine on another machine is this app's own; a new start makes a new one.
+	if (c.service?.remote) void c.service.stop();
+	c.service = undefined;
+	c.connected = false;
+	setState(c, { status: "starting" });
 	try {
-		launch = await findPine(APP_ROOT, app.isPackaged ? process.resourcesPath : undefined);
-		service = await connect(launch, { home: prefs.home ?? process.env.PINE_HOME, keep: prefs.keepRunning });
-		setState({ status: "ready", mode: service.mode, started: service.started, home: service.home, version: service.version, from: launch.from });
-		follow(service);
+		let s: Service;
+		let from: string;
+		if (c.env.host) {
+			s = await connectRemote(c.env.host, await loginEnv());
+			from = `ssh ${c.env.host}`;
+		} else {
+			const found = await findLaunch();
+			s = await connect(found, { home: prefs.home ?? process.env.PINE_HOME, keep: prefs.keepRunning });
+			from = found.from;
+		}
+		// Turned off or started again while it connected: what it found is not wanted.
+		if (round !== c.round || connections.get(c.env.id) !== c) return void release(s);
+		c.service = s;
+		setState(c, { status: "ready", mode: s.mode, started: s.started, home: s.home, version: s.version, from, remote: s.remote });
+		follow(c, s);
 	} catch (e) {
-		service = undefined;
-		setState({ status: "error", kind: e instanceof ServiceError ? e.kind : "failed", message: e instanceof Error ? e.message : String(e) });
+		if (round !== c.round) return;
+		setState(c, { status: "error", kind: e instanceof ServiceError ? e.kind : "failed", message: e instanceof Error ? e.message : String(e) });
 	}
 }
 
+/** The connection of an environment, made when it is turned on. */
+function connectionOf(env: Environment): Connection {
+	let c = connections.get(env.id);
+	if (!c) connections.set(env.id, (c = { env, state: { status: "starting" }, connected: false, round: 0 }));
+	return c;
+}
+
+/** An environment is turned off or forgotten: its stream ends and its daemon is let go of. */
+async function disconnect(id: string): Promise<void> {
+	const c = connections.get(id);
+	if (!c) return;
+	connections.delete(id);
+	c.round++;
+	c.stream?.abort();
+	const s = c.service;
+	c.service = undefined;
+	await release(s);
+}
+
+/** On: connected, without waiting for it. Off: let go of. One stays on, or there would be nothing to show. */
+async function turn(id: string, on: boolean): Promise<{ environments: ReturnType<typeof views> } | { error: string }> {
+	const env = prefs.environments.find((e) => e.id === id);
+	if (!env) return { error: "There is no such environment." };
+	if (!on && !prefs.environments.some((e) => e.enabled && e !== env)) return { error: "One environment stays on. Turn another one on first." };
+	if (env.enabled !== on) {
+		env.enabled = on;
+		savePrefs();
+		if (on) void start(connectionOf(env));
+		else await disconnect(id);
+	}
+	send("pine:environments", views());
+	return { environments: views() };
+}
+
 /**
- * The daemon's live events, read here and handed to the page in small batches: a model that
+ * A daemon's live events, read here and handed to the page in small batches: a model that
  * writes fast sends a hundred events a second, and each as a message of its own would keep the
  * page busy with the post office.
  */
-function follow(s: Service): void {
-	const abort = (stream = new AbortController());
+function follow(c: Connection, s: Service): void {
+	const abort = (c.stream = new AbortController());
 	let batch: unknown[] = [];
 	let timer: NodeJS.Timeout | undefined;
 	const flush = () => {
 		timer = undefined;
-		if (batch.length) send("pine:events", batch);
+		if (batch.length) send("pine:events", c.env.id, batch);
 		batch = [];
+	};
+	const up = (on: boolean) => {
+		c.connected = on;
+		send("pine:connection", c.env.id, on);
 	};
 	const loop = async () => {
 		let down = 0;
@@ -136,7 +221,7 @@ function follow(s: Service): void {
 				const res = await fetch(`${s.base}/events/stream?topic=%23`, { headers: { authorization: `Bearer ${s.token}` }, signal: abort.signal });
 				if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 				down = 0;
-				send("pine:connection", true);
+				up(true);
 				let buf = "";
 				const decoder = new TextDecoder();
 				for await (const chunk of res.body as any) {
@@ -157,19 +242,21 @@ function follow(s: Service): void {
 				// fall through to the retry
 			}
 			if (abort.signal.aborted) return;
-			send("pine:connection", false);
+			up(false);
 			down++;
 			// A daemon this app started and that is gone will not come back by waiting: start it again.
-			if (down === 5 && s.started && !quitting) return void startService();
+			// Nor does an SSH link that broke: it is made again.
+			if (down === 5 && (s.started || s.remote) && !quitting) return void start(c);
 			await new Promise((r) => setTimeout(r, 1000));
 		}
 	};
 	void loop();
 }
 
-/** One call of the control API in the owner's name. The page never holds the token. */
-async function call(method: string, url: string, body?: unknown): Promise<{ ok: boolean; status: number; data: any }> {
-	if (!service) return { ok: false, status: 503, data: { error: "pine is not running yet" } };
+/** One call of an environment's control API in the owner's name. The page never holds a token. */
+async function call(env: string, method: string, url: string, body?: unknown): Promise<{ ok: boolean; status: number; data: any }> {
+	const service = connections.get(String(env))?.service;
+	if (!service) return { ok: false, status: 503, data: { error: "this pine is not connected yet" } };
 	if ((method !== "GET" && method !== "POST") || typeof url !== "string" || !url.startsWith("/") || url.startsWith("//")) return { ok: false, status: 400, data: { error: "not a call of the control API" } };
 	try {
 		const res = await fetch(service.base + url, {
@@ -186,11 +273,12 @@ async function call(method: string, url: string, body?: unknown): Promise<{ ok: 
 	}
 }
 
-/** What the page may show straight from the daemon: pictures, videos and sounds. Nothing else is served this way. */
+/** What the page may show straight from a daemon (pine-media://<environment>/...): pictures, videos and sounds. Nothing else is served this way. */
 const MEDIA = [/^\/media\/tool\/[^/]+$/, /^\/tasks\/\d+\/images\/\d+$/, /^\/agents\/[^/]+\/image$/, /^\/agents\/[^/]+\/browser\/frame$/];
 
 async function media(request: Request): Promise<Response> {
 	const url = new URL(request.url);
+	const service = connections.get(url.hostname)?.service;
 	if (!service || request.method !== "GET" || !MEDIA.some((m) => m.test(url.pathname))) return new Response("not found", { status: 404 });
 	try {
 		const res = await fetch(service.base + url.pathname + url.search, { headers: { authorization: `Bearer ${service.token}` } });
@@ -467,21 +555,25 @@ function handle<T extends unknown[]>(channel: string, fn: (...args: T) => unknow
 }
 
 function wire(): void {
-	handle("pine:state", () => ({ state, home: prefs.home ?? process.env.PINE_HOME, prefs: { ...prefs, bounds: undefined }, platform: process.platform, fullscreen: Boolean(win?.isFullScreen()), focused: Boolean(win?.isFocused()), updates: Boolean(RELEASE_API), versions: { app: app.getVersion(), electron: process.versions.electron } }));
-	handle("pine:call", (method: string, url: string, body?: unknown) => call(method, url, body));
-	handle("pine:retry", () => startService());
+	handle("pine:state", () => ({ environments: views(), home: prefs.home ?? process.env.PINE_HOME, prefs: shownPrefs(), platform: process.platform, fullscreen: Boolean(win?.isFullScreen()), focused: Boolean(win?.isFocused()), updates: Boolean(RELEASE_API), versions: { app: app.getVersion(), electron: process.versions.electron } }));
+	handle("pine:call", (env: string, method: string, url: string, body?: unknown) => call(env, method, url, body));
+	handle("pine:retry", async (env: string) => {
+		const c = connections.get(String(env));
+		if (c) await start(c);
+	});
 	handle("pine:update", (again?: boolean) => update(again === true));
-	handle("pine:restart", async () => {
+	handle("pine:restart", async (env: string) => {
+		const c = connections.get(String(env));
 		// Only a daemon of this app's own is its to restart; another one is somebody's terminal.
-		if (!service?.started) throw new Error("this pine was started somewhere else (a terminal, a service). Restart it there.");
-		stream?.abort();
-		await service.stop();
-		await startService();
+		if (!c?.service?.started) throw new Error("this pine was started somewhere else (a terminal, a service). Restart it there.");
+		c.stream?.abort();
+		await c.service.stop();
+		await start(c);
 	});
 	handle("pine:init", async () => {
-		launch ??= await findPine(APP_ROOT, app.isPackaged ? process.resourcesPath : undefined);
+		const found = await findLaunch();
 		const args = ["init", ...(prefs.home ? [prefs.home] : []), "--yes"];
-		return runPine(launch, args, (line) => send("pine:init-line", line), process.env.PINE_SKIP_DOWNLOADS ? { PINE_SKIP_DOWNLOADS: "1" } : {});
+		return runPine(found, args, (line) => send("pine:init-line", line), process.env.PINE_SKIP_DOWNLOADS ? { PINE_SKIP_DOWNLOADS: "1" } : {});
 	});
 	// The browser the web tools drive, fetched by the pine the app runs: each pine wants the build
 	// of its own Playwright, and a home that was set up by another pine has an older one.
@@ -500,7 +592,49 @@ function wire(): void {
 		if (typeof change.keepRunning === "boolean") prefs.keepRunning = change.keepRunning;
 		if ("home" in change) prefs.home = typeof change.home === "string" && change.home.trim() ? change.home.trim() : undefined;
 		savePrefs();
-		return { ...prefs, bounds: undefined };
+		return shownPrefs();
+	});
+	// A machine is tried before it is added: one that does not answer is not kept, and what went wrong is said.
+	handle("pine:env-add", async (value: string) => {
+		let host: string | undefined;
+		let s: Service;
+		try {
+			host = remoteHost(String(value))?.host;
+			if (!host) return { error: "Write the machine as you would after ssh: host or user@host." };
+			const had = prefs.environments.find((e) => e.host === host);
+			if (had) return had.enabled ? { environments: views() } : turn(had.id, true);
+			s = await connectRemote(host, await loginEnv());
+		} catch (e) {
+			return { error: e instanceof Error ? e.message : String(e) };
+		}
+		// Added meanwhile, by a second click: the one there is stays.
+		if (prefs.environments.some((e) => e.host === host)) {
+			void s.stop();
+			return { environments: views() };
+		}
+		const env: Environment = { id: environmentId(host, prefs.environments.map((e) => e.id)), host, enabled: true };
+		prefs.environments.push(env);
+		savePrefs();
+		const c = connectionOf(env);
+		c.round++;
+		c.service = s;
+		c.state = { status: "ready", mode: s.mode, started: s.started, home: s.home, version: s.version, from: `ssh ${host}`, remote: s.remote };
+		send("pine:environments", views());
+		follow(c, s);
+		return { environments: views() };
+	});
+	handle("pine:env-enable", (id: string, on: boolean) => turn(String(id), on === true));
+	handle("pine:env-forget", async (id: string) => {
+		const env = prefs.environments.find((e) => e.id === id);
+		if (!env?.host) return { error: "This computer stays in the list; turn it off instead." };
+		if (env.enabled) {
+			const off = await turn(env.id, false);
+			if ("error" in off) return off;
+		}
+		prefs.environments = prefs.environments.filter((e) => e !== env);
+		savePrefs();
+		send("pine:environments", views());
+		return { environments: views() };
 	});
 	handle("pine:pick-folder", async (title?: string) => {
 		const r = await dialog.showOpenDialog(win!, { title: typeof title === "string" ? title.slice(0, 80) : "Choose a folder", properties: ["openDirectory", "createDirectory"] });
@@ -538,8 +672,7 @@ function wire(): void {
 		if (process.env.PINE_DESKTOP_VOICE) command = [process.env.PINE_DESKTOP_VOICE]; // a stand-in, for tests
 		else {
 			if (!isMac) throw new Error(NOT_HERE);
-			launch ??= await findPine(APP_ROOT, app.isPackaged ? process.resourcesPath : undefined);
-			const source = path.join(pineRoot(launch) ?? "", "src", "tui", "voice.swift");
+			const source = path.join(pineRoot(await findLaunch()) ?? "", "src", "tui", "voice.swift");
 			if (!fs.existsSync(source)) throw new Error("this pine has no voice input: its helper's source was not found. Update pine.");
 			command = [await buildVoice(path.join(app.getPath("userData"), "voice"), source)];
 		}
@@ -607,7 +740,7 @@ else {
 		ipcMain.on("pine:ready", (e) => {
 			if (!fromPage(e)) return;
 			pageReady = true;
-			send("pine:service", state);
+			send("pine:environments", views());
 			for (const dir of pendingFolders.splice(0)) send("pine:menu", `folder:${dir}`);
 		});
 		// From a checkout the program is Electron's, and so would be its icon in the Dock.
@@ -620,7 +753,8 @@ else {
 		}
 		buildMenu();
 		createWindow();
-		void startService();
+		// Every environment that is on, at once: one that is slow or does not answer holds up none of the others.
+		for (const env of prefs.environments) if (env.enabled) void start(connectionOf(env));
 		void firstCommand();
 		app.on("activate", show);
 	});
@@ -632,12 +766,20 @@ else {
 	app.on("before-quit", (e) => {
 		if (quitting) return;
 		savePrefs();
-		if (!service?.started || prefs.keepRunning) return;
-		// The daemon this app started ends with it, as the terminal UI's does: its agents are stopped
+		const waits: Service[] = [];
+		for (const c of connections.values()) {
+			const s = c.service;
+			if (!s) continue;
+			// ssh that forwards a port goes on by itself when nothing ends it.
+			if (s.remote && !s.started) void s.stop();
+			else if (s.started && (s.remote || !prefs.keepRunning)) waits.push(s);
+		}
+		if (!waits.length) return;
+		// A daemon this app started ends with it, as the terminal UI's does: its agents are stopped
 		// and its database closed before the app is gone.
 		e.preventDefault();
 		quitting = true;
-		stream?.abort();
-		void service.stop().finally(() => app.quit());
+		for (const c of connections.values()) c.stream?.abort();
+		void Promise.all(waits.map((s) => s.stop())).finally(() => app.quit());
 	});
 }
