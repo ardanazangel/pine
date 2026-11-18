@@ -5,7 +5,7 @@ import { CheckIcon, CpuIcon, SettingsIcon, ShieldIcon, SparkleIcon, BookIcon, Cl
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { api } from "./api.ts";
+import { apiFor } from "./api.ts";
 import { store, type Tab, useModel } from "./model.ts";
 import { childKind, MODES, oneLine, short } from "./text.ts";
 import { useLoad } from "./use-load.ts";
@@ -25,7 +25,8 @@ const TITLE = "mt-1.5 mb-1 flex min-h-6 w-full items-center gap-2 pr-2 pl-3.5 te
 export function AgentView({ tab }: { tab: Tab }) {
 	useModel(tab);
 	const s = useModel(store);
-	const info = s.agent(tab.agent);
+	const info = s.agent(tab.env, tab.agent);
+	const api = apiFor(tab.env);
 	// Each is asked by itself: an older pine answers only some of them, and what it does not know is left out.
 	const quiet = <T,>(ask: () => Promise<T>) => () => ask().catch(() => undefined);
 	const detail = useLoad(quiet(() => api.agentDetail(tab.agent)), [tab.agent, tab.codeTick]);
@@ -41,7 +42,7 @@ export function AgentView({ tab }: { tab: Tab }) {
 	const knows = (skills.data ?? []).filter((x) => x.scope === "global" || (x.agent === tab.agent && (x.scope === "agent" || x.session === tab.session)));
 	const tools = (servers.data ?? []).filter((x) => x.enabled && x.agents.includes(tab.agent) && (!x.session || x.session === tab.session));
 	const helpers = [...tab.children].reverse().slice(0, 8);
-	const elsewhere = [...s.busy].filter(([key, tasks]) => tasks.size && key.startsWith(`${tab.agent}:`) && key !== tab.key).map(([key]) => key.slice(tab.agent.length + 1));
+	const elsewhere = [...(s.env(tab.env)?.busy ?? [])].filter(([key, tasks]) => tasks.size && key.startsWith(`${tab.agent}:`) && key !== tab.conv).map(([key]) => key.slice(tab.agent.length + 1));
 	const memory = detail.data?.files.memory?.trim();
 	return (
 		<ScrollArea className="flex min-h-0 flex-1 cursor-auto flex-col text-xs select-text *:data-[slot=scroll-area-viewport]:scroll-fade">
@@ -57,7 +58,7 @@ export function AgentView({ tab }: { tab: Tab }) {
 					<ItemDescription>{info.description || "no description"}</ItemDescription>
 				</ItemContent>
 				<ItemActions>
-					<Button variant="outline" size="xs" onClick={() => s.openSettings("agents", tab.agent)}><SettingsIcon data-icon="inline-start" />Settings</Button>
+					<Button variant="outline" size="xs" onClick={() => s.openSettings("agents", tab.agent, tab.env)}><SettingsIcon data-icon="inline-start" />Settings</Button>
 				</ItemActions>
 			</Item>
 			<div className="mt-0.5 flex flex-wrap gap-1.5 px-3.5">
@@ -80,7 +81,7 @@ export function AgentView({ tab }: { tab: Tab }) {
 						</Item>
 					) : null}
 					{helpers.map(([id, c]) => (
-						<Item key={id} size="xs" render={<button type="button" onClick={() => void s.openTask(id)} />}>
+						<Item key={id} size="xs" render={<button type="button" onClick={() => void s.openTask(tab.env, id)} />}>
 							<ItemMedia>{c.running ? <Spinner aria-label="Working" className="size-3" /> : <CheckIcon />}</ItemMedia>
 							<ItemContent>
 								<ItemTitle>{c.agent}</ItemTitle>
@@ -90,7 +91,7 @@ export function AgentView({ tab }: { tab: Tab }) {
 						</Item>
 					))}
 					{elsewhere.map((session) => (
-						<Item key={session} size="xs" render={<button type="button" onClick={() => void s.openTab(tab.agent, session)} />}>
+						<Item key={session} size="xs" render={<button type="button" onClick={() => void s.openTab(tab.env, tab.agent, session)} />}>
 							<ItemMedia><Spinner aria-label="Working" className="size-3" /></ItemMedia>
 							<ItemContent>
 								<ItemTitle>{session}</ItemTitle>
@@ -108,7 +109,7 @@ export function AgentView({ tab }: { tab: Tab }) {
 						Listens to
 						<Badge variant="secondary">{listens.length}</Badge>
 						<span className="min-w-0 flex-1" />
-						<Button variant="ghost" size="xs" onClick={() => s.openSettings("events")}>Events</Button>
+						<Button variant="ghost" size="xs" onClick={() => s.openSettings("events", undefined, tab.env)}>Events</Button>
 					</FieldLegend>
 					{listens.length ? listens.map((x) => (
 						<Item key={x.name} size="xs">
@@ -149,7 +150,7 @@ export function AgentView({ tab }: { tab: Tab }) {
 						Skills
 						<Badge variant="secondary">{knows.length}</Badge>
 						<span className="min-w-0 flex-1" />
-						<Button variant="ghost" size="xs" onClick={() => s.openSettings("skills")}>Skills</Button>
+						<Button variant="ghost" size="xs" onClick={() => s.openSettings("skills", undefined, tab.env)}>Skills</Button>
 					</FieldLegend>
 					{knows.length ? knows.map((x) => {
 						const tag = x.scope === "global" ? "all agents" : x.scope === "local" ? "this conversation" : undefined;
@@ -172,7 +173,7 @@ export function AgentView({ tab }: { tab: Tab }) {
 						MCP servers
 						<Badge variant="secondary">{tools.length}</Badge>
 						<span className="min-w-0 flex-1" />
-						<Button variant="ghost" size="xs" onClick={() => s.openSettings("mcp")}>Servers</Button>
+						<Button variant="ghost" size="xs" onClick={() => s.openSettings("mcp", undefined, tab.env)}>Servers</Button>
 					</FieldLegend>
 					{tools.length ? tools.map((x) => {
 						const tag = x.scope === "global" ? "all agents" : x.session ? "this conversation" : undefined;
