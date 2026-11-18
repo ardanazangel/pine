@@ -24,7 +24,7 @@ import { Streamdown, type Components, type ControlsConfig, type ExtraProps } fro
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { api, media } from "./api.ts";
+import { apiFor, media } from "./api.ts";
 import { bridge } from "./bridge.ts";
 import { mediaKind } from "./model.ts";
 import { errText, short } from "./text.ts";
@@ -59,6 +59,8 @@ const isWeb = (url: string) => /^https?:\/\//i.test(url);
 const DATA_IMAGE = /^data:image\/(png|jpeg|gif|webp);base64,/i;
 
 export interface Where {
+	/** The environment whose pine the agent is of: its files and pictures are fetched there. */
+	env: string;
 	agent: string;
 	session?: string;
 }
@@ -128,7 +130,7 @@ function Player({ kind, src, alt }: { kind: "image" | "video" | "audio"; src: st
 }
 
 /** A line to click instead of a picture: the address is shown, and nothing is fetched before the click. */
-function Remote({ url, alt }: { url: string; alt: string }) {
+function Remote({ url, alt, env }: { url: string; alt: string; env: string }) {
 	const [state, setState] = useState<{ loading?: boolean; error?: string; got?: { kind: "image" | "video" | "audio"; src: string } }>({});
 	useEffect(() => () => void (state.got && URL.revokeObjectURL(state.got.src)), [state.got]);
 	if (state.got) return <Player kind={state.got.kind} src={state.got.src} alt={alt} />;
@@ -137,7 +139,7 @@ function Remote({ url, alt }: { url: string; alt: string }) {
 		if (state.loading) return;
 		setState({ loading: true });
 		try {
-			const got = await api.fetchImage(url);
+			const got = await apiFor(env).fetchImage(url);
 			const kind = got.mime.startsWith("video/") ? "video" : got.mime.startsWith("audio/") ? "audio" : "image";
 			const blob = new Blob([Uint8Array.from(atob(got.base64), (c) => c.charCodeAt(0))], { type: got.mime });
 			setState({ got: { kind, src: URL.createObjectURL(blob) } });
@@ -157,7 +159,8 @@ function Picture({ src, alt }: React.ComponentProps<"img"> & ExtraProps) {
 	const where = useContext(WhereContext);
 	const url = typeof src === "string" ? src : "";
 	const words = alt ?? "";
-	if (isWeb(url)) return <Remote url={url} alt={words} />;
+	// The pine that fetches it, on the click: the one whose agent wrote it.
+	if (isWeb(url)) return <Remote url={url} alt={words} env={where?.env ?? "local"} />;
 	if (DATA_IMAGE.test(url)) return <Player kind="image" src={url} alt={words} />;
 	if (where && url && !/^[a-z][a-z0-9+.-]*:/i.test(url)) {
 		const kind = mediaKind(url.split(/[?#]/)[0]);
@@ -167,7 +170,7 @@ function Picture({ src, alt }: React.ComponentProps<"img"> & ExtraProps) {
 		} catch {
 			// as written
 		}
-		if (kind) return <Player kind={kind} src={media.workspace(where.agent, file, where.session)} alt={words} />;
+		if (kind) return <Player kind={kind} src={media.workspace(where.env, where.agent, file, where.session)} alt={words} />;
 	}
 	return <>{words || url}</>;
 }

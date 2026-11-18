@@ -18,7 +18,7 @@ const labelParts = (label: string): [string, string] => {
 };
 
 /** A request for the owner's approval. Values only the owner has are typed here and go straight to the daemon. */
-export function ApprovalDialog({ req }: { req: Approval }) {
+export function ApprovalDialog({ env, req }: { env: string; req: Approval }) {
 	const s = store;
 	const fields = req.inputs ?? [];
 	const [values, setValues] = useState<Record<string, string>>({});
@@ -28,9 +28,9 @@ export function ApprovalDialog({ req }: { req: Approval }) {
 		if (fields.length) {
 			const empty = fields.find((f) => !values[f.name]?.trim());
 			if (empty) return void document.getElementById(`ap-${empty.name}`)?.focus();
-			return void s.decide(req.id, true, false, Object.fromEntries(fields.map((f) => [f.name, values[f.name].trim()])));
+			return void s.decide(env, req.id, true, false, Object.fromEntries(fields.map((f) => [f.name, values[f.name].trim()])));
 		}
-		void s.decide(req.id, true, always);
+		void s.decide(env, req.id, true, always);
 	};
 	useEffect(() => {
 		if (fields.length) return;
@@ -39,7 +39,7 @@ export function ApprovalDialog({ req }: { req: Approval }) {
 			if (e.metaKey || e.ctrlKey || e.altKey) return;
 			if (e.key === "a" || e.key === "y") allow();
 			else if (e.key === "s" && req.remember) allow(true);
-			else if (e.key === "d" || e.key === "n") void s.decide(req.id, false);
+			else if (e.key === "d" || e.key === "n") void s.decide(env, req.id, false);
 			else return;
 			e.preventDefault();
 		};
@@ -56,7 +56,7 @@ export function ApprovalDialog({ req }: { req: Approval }) {
 				<ScrollArea className="-mx-4 max-h-(--dialog-scroll) flex min-h-0 flex-col *:data-[slot=scroll-area-viewport]:scroll-fade">
 				<div className="flex flex-col gap-3 px-4 select-text">
 					<div className="flex items-center gap-2 text-muted-foreground">
-						<span>{req.agent}</span>
+						<span>{req.agent}{s.on(env)}</span>
 						{req.task ? <span className="text-faint">task #{req.task}</span> : null}
 						<Badge variant="secondary" className="font-mono">{req.tool}</Badge>
 					</div>
@@ -83,7 +83,7 @@ export function ApprovalDialog({ req }: { req: Approval }) {
 				<DialogFooter>
 					<Button variant="ghost" onClick={() => s.closeAsking()}>Later <Kbd>esc</Kbd></Button>
 					<span className="min-w-0 flex-1" />
-					<Button variant="destructive" onClick={() => void s.decide(req.id, false)}>Deny{fields.length ? "" : <Kbd>d</Kbd>}</Button>
+					<Button variant="destructive" onClick={() => void s.decide(env, req.id, false)}>Deny{fields.length ? "" : <Kbd>d</Kbd>}</Button>
 					{req.remember && !fields.length ? <Button variant="outline" onClick={() => allow(true)}>Always here <Kbd>s</Kbd></Button> : null}
 					<Button onClick={() => allow()}>{fields.length ? "Save and allow" : req.holds ? "Allow" : "Allow once"}{fields.length ? "" : <Kbd>a</Kbd>}</Button>
 				</DialogFooter>

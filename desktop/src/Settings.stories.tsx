@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { AgentInfo, McpServer, Overview, Setting } from "./api.ts";
-import { store } from "./model.ts";
+import { Env, store } from "./model.ts";
 import { Settings } from "./Settings.tsx";
 
 // The settings tab as the app shows it, without a daemon: the bridge's `call` is a stand-in that
@@ -51,12 +51,17 @@ const answers: Record<string, unknown> = {
 	"/mcp/states": { linear: "needs sign-in", notes: "connected" },
 };
 
-window.pine.call = async (_method, url) => (url in answers ? { ok: true, status: 200, data: answers[url] } : { ok: false, status: 404, data: { error: `no stand-in for ${url}` } });
+window.pine.call = async (_env, _method, url) => (url in answers ? { ok: true, status: 200, data: answers[url] } : { ok: false, status: 404, data: { error: `no stand-in for ${url}` } });
+
+// This computer's pine, as the app knows it once it answers.
+const here = store.env("local") ?? new Env({ id: "local", label: "This Mac", enabled: true, state: { status: "starting" }, connected: false });
+if (!store.envs.includes(here)) store.envs.push(here);
 
 function Tab({ section }: { section: string }) {
 	store.section = section;
 	store.settingsAgent = undefined;
-	store.agents = agents;
+	store.settingsEnv = "local";
+	here.agents = agents;
 	return (
 		<div className="flex h-180 w-250">
 			<Settings />

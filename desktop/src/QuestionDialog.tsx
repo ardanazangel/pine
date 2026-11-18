@@ -11,19 +11,19 @@ import type { Approval } from "./api.ts";
 import { store } from "./model.ts";
 
 /** A question of the agent's: the answers it offers, and a line for the owner's own words. */
-export function QuestionDialog({ req }: { req: Approval }) {
+export function QuestionDialog({ env, req }: { env: string; req: Approval }) {
 	const s = store;
 	const choices = req.choices ?? [];
 	const [own, setOwn] = useState("");
 	const [at, setAt] = useState(0);
 	// The answer field, not the first answer offered: a digit typed there picks an answer.
 	const field = useRef<HTMLInputElement>(null);
-	const answer = (text: string) => void s.decide(req.id, true, false, { answer: text });
+	const answer = (text: string) => void s.decide(env, req.id, true, false, { answer: text });
 	return (
 		<Dialog open onOpenChange={(open) => open || s.closeAsking()}>
 			<DialogContent data-tone="accent" showCloseButton={false} initialFocus={field} className="sm:max-w-xl">
 				<DialogHeader>
-					<DialogTitle className="flex items-center gap-2"><MessageSquareIcon className="text-primary" /> {req.agent} asks</DialogTitle>
+					<DialogTitle className="flex items-center gap-2"><MessageSquareIcon className="text-primary" /> {req.agent}{s.on(env)} asks</DialogTitle>
 				</DialogHeader>
 				<ScrollArea className="-mx-4 max-h-(--dialog-scroll) flex min-h-0 flex-col *:data-[slot=scroll-area-viewport]:scroll-fade">
 				<div className="flex flex-col gap-3 px-4 select-text">
@@ -57,7 +57,7 @@ export function QuestionDialog({ req }: { req: Approval }) {
 				<DialogFooter>
 					<Button variant="ghost" onClick={() => s.closeAsking()}>Later <Kbd>esc</Kbd></Button>
 					<span className="min-w-0 flex-1" />
-					<Button variant="ghost" onClick={() => void s.decide(req.id, false)}>No answer</Button>
+					<Button variant="ghost" onClick={() => void s.decide(env, req.id, false)}>No answer</Button>
 					<Button disabled={!own.trim() && !choices.length} onClick={() => answer(own.trim() || choices[at])}>Answer</Button>
 				</DialogFooter>
 			</DialogContent>

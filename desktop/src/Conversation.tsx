@@ -28,7 +28,7 @@ import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Trace, TraceCollapsible, TraceCollapsibleContent, TraceCollapsibleTrigger, TraceDescription, TraceIcon, TraceLine, TraceTitle } from "@/components/ui/trace";
 import { cn } from "@/lib/utils";
-import { type AgentDetail, api, type TranscriptEntry } from "./api.ts";
+import { type AgentDetail, apiFor, media, type TranscriptEntry } from "./api.ts";
 import { bridge } from "./bridge.ts";
 import { Composer } from "./Composer.tsx";
 import { Markdown, MEDIA } from "./markdown.tsx";
@@ -83,7 +83,7 @@ function Thought({ text, title, description, live = false }: { text: string; tit
 }
 
 /** One tool call (Tool): a line with what it did, which opens on what it returned or why it failed. */
-function Call({ tool, subject, status, ms, depth = 0, output, error, images }: { tool: string; subject?: string; status: "run" | "ok" | "fail"; ms?: number; depth?: number; output?: string; error?: string; images?: string[] }) {
+function Call({ env, tool, subject, status, ms, depth = 0, output, error, images }: { env: string; tool: string; subject?: string; status: "run" | "ok" | "fail"; ms?: number; depth?: number; output?: string; error?: string; images?: string[] }) {
 	const more = Boolean(output || error || images?.length);
 	// A call made inside another one is drawn under it, by how deep it is.
 	const root = { "data-part": "tool", style: depth ? { paddingLeft: `calc(var(--spacing) * ${depth * 3.5})` } : undefined };
@@ -116,10 +116,10 @@ function Call({ tool, subject, status, ms, depth = 0, output, error, images }: {
 				{(images ?? []).map((id) => (
 					<div className={MEDIA.box.image} key={id}>
 						<Dialog>
-							<DialogTrigger nativeButton={false} aria-label="The picture, larger" render={<img className={MEDIA.image} src={`pine-media://daemon/media/tool/${encodeURIComponent(id)}`} alt="" />} />
+							<DialogTrigger nativeButton={false} aria-label="The picture, larger" render={<img className={MEDIA.image} src={media.tool(env, id)} alt="" />} />
 							<DialogContent showCloseButton={false} className="flex max-h-11/12 w-auto max-w-11/12 flex-col items-center sm:max-w-11/12">
 								<DialogTitle className="sr-only">The picture, larger</DialogTitle>
-								<DialogClose nativeButton={false} aria-label="Close the picture" render={<img src={`pine-media://daemon/media/tool/${encodeURIComponent(id)}`} alt="" className="min-h-0 max-w-full rounded-md object-contain" />} />
+								<DialogClose nativeButton={false} aria-label="Close the picture" render={<img src={media.tool(env, id)} alt="" className="min-h-0 max-w-full rounded-md object-contain" />} />
 							</DialogContent>
 						</Dialog>
 					</div>
@@ -133,9 +133,9 @@ function Call({ tool, subject, status, ms, depth = 0, output, error, images }: {
  * A sub-task (Subagent): who does it and what, as a line that opens its own tab. Its own calls
  * are not in this conversation's stream, so they are read in that tab and not drawn here.
  */
-function Child({ part }: { part: Extract<Part, { p: "child" }> }) {
+function Child({ env, part }: { env: string; part: Extract<Part, { p: "child" }> }) {
 	return (
-		<button type="button" data-part="child" style={part.depth > 1 ? { paddingLeft: `calc(var(--spacing) * ${(part.depth - 1) * 3.5})` } : undefined} onClick={() => void store.openTask(part.task)}>
+		<button type="button" data-part="child" style={part.depth > 1 ? { paddingLeft: `calc(var(--spacing) * ${(part.depth - 1) * 3.5})` } : undefined} onClick={() => void store.openTask(env, part.task)}>
 			<TraceLine status={traceStatus(part.status)}>
 				<TraceIcon>
 					<StatusIcon status={part.status} />
@@ -153,15 +153,15 @@ function Child({ part }: { part: Extract<Part, { p: "child" }> }) {
 	);
 }
 
-function PartLine({ part, live }: { part: Part; live: boolean }) {
+function PartLine({ env, part, live }: { env: string; part: Part; live: boolean }) {
 	if (part.p === "thought") {
 		const running = live && !part.done;
 		const time = running ? `${Math.round((Date.now() - part.startedAt) / 1000)}s` : part.done ? took(part.ms) : "";
 		return <Thought text={part.text} live={running} title={running ? "Thinking" : "Thought"} description={[time, part.speed].filter(Boolean).join(" · ")} />;
 	}
 	if (part.p === "words") return <p className="whitespace-pre-wrap select-text" data-part="words">{part.text}</p>;
-	if (part.p === "child") return <Child part={part} />;
-	return <Call tool={part.tool} subject={part.subject} status={part.status} ms={part.ms} depth={part.depth} error={part.status === "fail" ? part.preview : undefined} />;
+	if (part.p === "child") return <Child env={env} part={part} />;
+	return <Call env={env} tool={part.tool} subject={part.subject} status={part.status} ms={part.ms} depth={part.depth} error={part.status === "fail" ? part.preview : undefined} />;
 }
 
 /** "12 tool calls · bash ×6 · read ×4 · edit · +1 more · 2 thoughts · 1 failed" */
@@ -186,14 +186,14 @@ function workHead(parts: Part[], done: boolean): string {
 }
 
 /** The work of a turn (Task): a summary line that opens into its steps as they are taken. */
-function Work({ item }: { item: Extract<Item, { t: "work" }> }) {
+function Work({ env, item }: { env: string; item: Extract<Item, { t: "work" }> }) {
 	const [open, setOpen] = useState(item.open);
 	const parts = item.parts;
 	// A turn with a single call or thought is that call or thought itself, with no line above it.
 	if (parts.length === 1 && item.done)
 		return (
 			<Trace data-item="work">
-				<PartLine part={parts[0]} live={false} />
+				<PartLine env={env} part={parts[0]} live={false} />
 			</Trace>
 		);
 	const shown = open ? parts : item.done ? [] : parts.slice(-6);
@@ -216,7 +216,7 @@ function Work({ item }: { item: Extract<Item, { t: "work" }> }) {
 			<TraceCollapsibleContent>
 				<Trace>
 					{shown.map((p, i) => (
-						<PartLine key={open ? i : parts.length - shown.length + i} part={p} live={!item.done} />
+						<PartLine key={open ? i : parts.length - shown.length + i} env={env} part={p} live={!item.done} />
 					))}
 				</Trace>
 			</TraceCollapsibleContent>
@@ -253,13 +253,13 @@ export function OwnerTurn({ text, from, files, menu }: { text: string; from?: st
 	);
 }
 
-function Entry({ entry, agent }: { entry: TranscriptEntry; agent: string }) {
+function Entry({ env, entry, agent }: { env: string; entry: TranscriptEntry; agent: string }) {
 	if (entry.kind === "user") return <OwnerTurn text={entry.text ?? ""} from="task" />;
 	if (entry.kind === "text")
 		return (
 			<Message>
 				<MessageContent>
-					<Markdown text={entry.text ?? ""} where={{ agent }} />
+					<Markdown text={entry.text ?? ""} where={{ env, agent }} />
 				</MessageContent>
 			</Message>
 		);
@@ -273,7 +273,7 @@ function Entry({ entry, agent }: { entry: TranscriptEntry; agent: string }) {
 	const result = entry.result ? short(entry.result, 4000) : undefined;
 	return (
 		<Trace>
-			<Call tool={entry.tool ?? ""} subject={entry.subject ? oneLine(entry.subject) : ""} status={ok} ms={entry.ms} output={ok === "fail" ? undefined : result} error={ok === "fail" ? result : undefined} images={entry.images} />
+			<Call env={env} tool={entry.tool ?? ""} subject={entry.subject ? oneLine(entry.subject) : ""} status={ok} ms={entry.ms} output={ok === "fail" ? undefined : result} error={ok === "fail" ? result : undefined} images={entry.images} />
 		</Trace>
 	);
 }
@@ -283,7 +283,7 @@ function Entry({ entry, agent }: { entry: TranscriptEntry; agent: string }) {
  * what it wants and why and the answers; once answered, a line again. What needs typing (a secret,
  * the owner's own words) opens the dialog.
  */
-function ApprovalCard({ item }: { item: Extract<Item, { t: "approval" }> }) {
+function ApprovalCard({ env, item }: { env: string; item: Extract<Item, { t: "approval" }> }) {
 	const { req, state } = item;
 	const question = req.tool === "question";
 	const choices = req.choices ?? [];
@@ -320,19 +320,19 @@ function ApprovalCard({ item }: { item: Extract<Item, { t: "approval" }> }) {
 				<ItemActions>
 					{question ? (
 						<>
-							<Button size="sm" variant="ghost" onClick={() => void store.decide(req.id, false)}>No answer</Button>
-							<Button size="sm" variant="outline" onClick={() => store.ask(req.id)}>{choices.length ? "In my own words…" : "Answer…"}</Button>
+							<Button size="sm" variant="ghost" onClick={() => void store.decide(env, req.id, false)}>No answer</Button>
+							<Button size="sm" variant="outline" onClick={() => store.ask(env, req.id)}>{choices.length ? "In my own words…" : "Answer…"}</Button>
 						</>
 					) : typed ? (
 						<>
-							<Button size="sm" variant="outline" onClick={() => void store.decide(req.id, false)}>Deny</Button>
-							<Button size="sm" onClick={() => store.ask(req.id)}>Decide…</Button>
+							<Button size="sm" variant="outline" onClick={() => void store.decide(env, req.id, false)}>Deny</Button>
+							<Button size="sm" onClick={() => store.ask(env, req.id)}>Decide…</Button>
 						</>
 					) : (
 						<>
-							<Button size="sm" variant="outline" onClick={() => void store.decide(req.id, false)}>Deny</Button>
-							{req.remember ? <Button size="sm" variant="outline" onClick={() => void store.decide(req.id, true, true)}>Always here</Button> : null}
-							<Button size="sm" onClick={() => void store.decide(req.id, true)}>{req.holds ? "Allow" : "Allow once"}</Button>
+							<Button size="sm" variant="outline" onClick={() => void store.decide(env, req.id, false)}>Deny</Button>
+							{req.remember ? <Button size="sm" variant="outline" onClick={() => void store.decide(env, req.id, true, true)}>Always here</Button> : null}
+							<Button size="sm" onClick={() => void store.decide(env, req.id, true)}>{req.holds ? "Allow" : "Allow once"}</Button>
 						</>
 					)}
 				</ItemActions>
@@ -340,7 +340,7 @@ function ApprovalCard({ item }: { item: Extract<Item, { t: "approval" }> }) {
 					// The answers it offers, the recommended one first (Suggestion: a Button that answers with its words).
 					<ItemFooter className="flex-wrap justify-start">
 						{choices.map((c, i) => {
-							const answer = <Button key={i} size="sm" variant={i === 0 ? "default" : "outline"} onClick={() => void store.decide(req.id, true, false, { answer: c })}>{c}</Button>;
+							const answer = <Button key={i} size="sm" variant={i === 0 ? "default" : "outline"} onClick={() => void store.decide(env, req.id, true, false, { answer: c })}>{c}</Button>;
 							return i === 0 ? (
 								<Tooltip key={i}>
 									<TooltipTrigger render={answer} />
@@ -388,7 +388,7 @@ export function Steps({ items }: { items: Array<{ text: string; status: string }
 /** The menu of a message of the owner's: what can be done from it. */
 async function branchMenu(tab: Tab, task: number): Promise<void> {
 	const picked = await bridge.contextMenu([{ id: "branch", label: "Branch from here" }, ...(tab.folder ? [{ id: "worktree", label: "Branch from here into a worktree" }] : [])]);
-	if (picked === "branch" || picked === "worktree") await store.branch(tab.agent, tab.session, task, picked === "worktree");
+	if (picked === "branch" || picked === "worktree") await store.branch(tab.env, tab.agent, tab.session, task, picked === "worktree");
 }
 
 /** One item of a conversation, drawn as what it is. */
@@ -402,12 +402,12 @@ export const Row = memo(function Row({ item, tab }: { item: Item; v: number; tab
 			return (
 				<Message data-item="answer">
 					<MessageContent>
-						<Markdown text={item.text} live={item.live} where={{ agent: item.agent, session: tab.kind === "chat" ? tab.session : undefined }} />
+						<Markdown text={item.text} live={item.live} where={{ env: tab.env, agent: item.agent, session: tab.kind === "chat" ? tab.session : undefined }} />
 					</MessageContent>
 				</Message>
 			);
 		case "work":
-			return <Work item={item} />;
+			return <Work env={tab.env} item={item} />;
 		case "note": {
 			const ToneIcon = TONE_ICON[item.tone];
 			return (
@@ -435,7 +435,7 @@ export const Row = memo(function Row({ item, tab }: { item: Item; v: number; tab
 				</Alert>
 			);
 		case "approval":
-			return <ApprovalCard item={item} />;
+			return <ApprovalCard env={tab.env} item={item} />;
 		case "steps":
 			return <Steps items={item.items} />;
 		case "media":
@@ -474,7 +474,7 @@ export const Row = memo(function Row({ item, tab }: { item: Item; v: number; tab
 				</Marker>
 			);
 		case "entry":
-			return <Entry entry={item.entry} agent={tab.agent} />;
+			return <Entry env={tab.env} entry={item.entry} agent={tab.agent} />;
 	}
 });
 
@@ -502,12 +502,12 @@ function Checkpoint({ tab }: { tab: Tab }) {
 /** Where a conversation begins: who this agent is, what it runs on and reaches, and what it has. */
 function Welcome({ tab }: { tab: Tab }) {
 	useModel(store);
-	const info = store.agent(tab.agent);
+	const info = store.agent(tab.env, tab.agent);
 	const [has, setHas] = useState<AgentDetail>();
 	useEffect(() => {
 		let live = true;
 		// (An older pine does not say; the line is then left out.)
-		api.agentDetail(tab.agent).then((d) => live && setHas(d), () => {});
+		apiFor(tab.env).agentDetail(tab.agent).then((d) => live && setHas(d), () => {});
 		return () => {
 			live = false;
 		};
@@ -547,7 +547,7 @@ function Welcome({ tab }: { tab: Tab }) {
 						<TriangleAlertIcon />
 						<AlertDescription>{info.modelProblem} Sign in to a provider (a Claude, ChatGPT or Copilot subscription, or an API key) or add a model server of your own, then choose the model {tab.agent} runs on.</AlertDescription>
 						<AlertAction>
-							<Button variant="outline" size="xs" onClick={() => store.openSettings("models")}>Models…</Button>
+							<Button variant="outline" size="xs" onClick={() => store.openSettings("models", undefined, tab.env)}>Models…</Button>
 						</AlertAction>
 					</Alert>
 				) : null}
@@ -557,7 +557,7 @@ function Welcome({ tab }: { tab: Tab }) {
 				<div className="flex flex-wrap justify-center gap-1.5">
 					{/* A suggestion: a Button that puts its words into the input. */}
 					<Button variant="outline" size="xs" onClick={() => say("What can you do for me, and what are you set up with?")}>What can you do?</Button>
-					<Button variant="outline" size="xs" onClick={() => store.openSettings("agents", tab.agent)}><SettingsIcon data-icon="inline-start" />Agent settings</Button>
+					<Button variant="outline" size="xs" onClick={() => store.openSettings("agents", tab.agent, tab.env)}><SettingsIcon data-icon="inline-start" />Agent settings</Button>
 					<Button variant="outline" size="xs" onClick={() => void store.pickFolder(tab)}><FolderIcon data-icon="inline-start" />Give it a folder</Button>
 					<Button variant="outline" size="xs" onClick={() => void store.command("palette")}><CommandIcon data-icon="inline-start" />Commands <Kbd>⌘K</Kbd></Button>
 				</div>
@@ -665,9 +665,9 @@ function StatusLine({ tab }: { tab: Tab }) {
 		</Marker>
 	);
 	if (!tab.busy) {
-		if (waiting.length) return line(<TriangleAlertIcon />, waiting[0].req.tool === "question" ? "A question waits for your answer." : "A request waits for your approval.", <Button variant="outline" size="xs" onClick={() => store.ask(waiting[0].req.id)}>Open</Button>, true);
+		if (waiting.length) return line(<TriangleAlertIcon />, waiting[0].req.tool === "question" ? "A question waits for your answer." : "A request waits for your approval.", <Button variant="outline" size="xs" onClick={() => store.ask(tab.env, waiting[0].req.id)}>Open</Button>, true);
 		if (goal) return line(<TargetIcon />, `goal · round ${goal.round} of ${goal.until} · checking whether it is met`, <Button variant="outline" size="xs" onClick={() => void store.setGoal(tab, "pause")}>Pause</Button>);
-		if (elsewhere) return line(<TriangleAlertIcon />, `${elsewhere.agent} · ${elsewhere.session} waits for you.`, <Button variant="outline" size="xs" onClick={() => store.activate(elsewhere)}>Go there</Button>, true);
+		if (elsewhere) return line(<TriangleAlertIcon />, `${elsewhere.agent}${store.on(elsewhere.env)} · ${elsewhere.session} waits for you.`, <Button variant="outline" size="xs" onClick={() => store.activate(elsewhere)}>Go there</Button>, true);
 		if (tab.programs.length) return line(<PlayIcon />, `${plural(tab.programs.length, "program")} still running`, <Button variant="ghost" size="xs" onClick={() => void store.command("code-running")}>Show</Button>);
 		return line(null, "");
 	}
@@ -686,7 +686,7 @@ function StatusLine({ tab }: { tab: Tab }) {
 		tab.tokens.output ? `${count(total)}↑${tab.tokens.cached ? ` (${Math.round((100 * tab.tokens.cached) / Math.max(1, total))}% cached)` : ""} ${count(tab.tokens.output)}↓` : "",
 		speedText(tab.speed),
 	].filter(Boolean);
-	return line(<Spinner aria-label="Working" className="size-3.5" />, parts.join(" · "), waiting.length ? <Button variant="outline" size="xs" onClick={() => store.ask(waiting[0].req.id)}>Open</Button> : null, waiting.length > 0);
+	return line(<Spinner aria-label="Working" className="size-3.5" />, parts.join(" · "), waiting.length ? <Button variant="outline" size="xs" onClick={() => store.ask(tab.env, waiting[0].req.id)}>Open</Button> : null, waiting.length > 0);
 }
 
 /** How full the conversation's context window is (Context): the share in the head, the rest on hover. */
@@ -728,10 +728,16 @@ function ConvHead({ tab }: { tab: Tab }) {
 			</Avatar>
 			<Breadcrumb className="min-w-0 shrink">
 				<BreadcrumbList className="flex-nowrap">
+					{store.shown.length > 1 ? (
+						<>
+							<BreadcrumbItem className="text-faint" title="The environment whose pine this is">{store.env(tab.env)?.label}</BreadcrumbItem>
+							<BreadcrumbSeparator />
+						</>
+					) : null}
 					<BreadcrumbItem>{tab.agent}</BreadcrumbItem>
 					<BreadcrumbSeparator />
 					<BreadcrumbItem className="min-w-0">
-						<BreadcrumbPage className="truncate" title={chat ? `conversation ${tab.session}` : undefined}>{chat ? store.titleOf(tab.agent, tab.session) : `task #${tab.task}`}</BreadcrumbPage>
+						<BreadcrumbPage className="truncate" title={chat ? `conversation ${tab.session}` : undefined}>{chat ? store.titleOf(tab.env, tab.agent, tab.session) : `task #${tab.task}`}</BreadcrumbPage>
 					</BreadcrumbItem>
 				</BreadcrumbList>
 			</Breadcrumb>
@@ -746,7 +752,7 @@ function ConvHead({ tab }: { tab: Tab }) {
 					<TooltipContent>Works in {tab.folder}</TooltipContent>
 				</Tooltip>
 			) : null}
-			{chat && store.pins.has(tab.key) ? <StarIcon size={12} className="text-faint" /> : null}
+			{chat && store.isPinned(tab) ? <StarIcon size={12} className="text-faint" /> : null}
 			<span className="min-w-0 flex-1" />
 			{tab.context !== undefined ? <ContextUsage tab={tab} percent={tab.context} /> : null}
 			{chat ? (

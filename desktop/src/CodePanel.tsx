@@ -25,7 +25,7 @@ import { tags as t } from "@lezer/highlight";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { CodeBlock, CodeBlockContent, CodeBlockLine } from "@/components/ui/code-block";
 import { Printed } from "@/components/printed";
-import { api, type Change, media, type TranscriptEntry } from "./api.ts";
+import { apiFor, type Change, media, type TranscriptEntry } from "./api.ts";
 import { AgentView } from "./AgentView.tsx";
 import { bridge } from "./bridge.ts";
 import { BrowserView } from "./Browser.tsx";
@@ -224,9 +224,9 @@ function ChangeRow({ c }: { c: Change }) {
 
 /** What differs from the last commit, or from before the owner's last message. */
 function Changes({ tab, turn, openFile }: { tab: Tab; turn: boolean; openFile: (file: string) => void }) {
-	const list = useLoad(async () => (turn ? { ...(await api.turn(tab.agent, tab.session)), repo: true, branch: undefined as string | undefined, worktree: undefined } : { ...(await api.changes(tab.agent, tab.session)), note: undefined as string | undefined, prompt: undefined as string | undefined }), [tab.key, tab.codeTick, turn]);
+	const list = useLoad(async () => (turn ? { ...(await apiFor(tab.env).turn(tab.agent, tab.session)), repo: true, branch: undefined as string | undefined, worktree: undefined } : { ...(await apiFor(tab.env).changes(tab.agent, tab.session)), note: undefined as string | undefined, prompt: undefined as string | undefined }), [tab.key, tab.codeTick, turn]);
 	const [file, setFile] = useState<string>();
-	const diff = useLoad(async () => (file ? (turn ? api.turnDiff(tab.agent, tab.session, file) : api.diff(tab.agent, tab.session, file)) : undefined), [tab.key, file, tab.codeTick, turn]);
+	const diff = useLoad(async () => (file ? (turn ? apiFor(tab.env).turnDiff(tab.agent, tab.session, file) : apiFor(tab.env).diff(tab.agent, tab.session, file)) : undefined), [tab.key, file, tab.codeTick, turn]);
 	useEffect(() => setFile(undefined), [tab.key, turn]);
 	const data = list.data;
 	// A change is named from the top of its repository; a file is opened by its path in the folder.
@@ -300,7 +300,7 @@ function FileTree({ tab, pick, tick }: { tab: Tab; pick: (file: string) => void;
 /** A folder's rows in the tree, read when it opens; `onLoad` redraws the tree around once they are read. */
 function Dir({ tab, dir, depth, tick, onLoad }: { tab: Tab; dir: string; depth: number; tick: number; onLoad: () => void }) {
 	const state = treeOf(tab.key);
-	const read = useLoad(() => api.tree(tab.agent, tab.session, dir), [tab.key, dir, tick]);
+	const read = useLoad(() => apiFor(tab.env).tree(tab.agent, tab.session, dir), [tab.key, dir, tick]);
 	useEffect(() => {
 		if (read.loading) return;
 		if (read.data) state.dirs.set(dir, read.data.entries), state.failed.delete(dir);
@@ -335,7 +335,7 @@ function Dir({ tab, dir, depth, tick, onLoad }: { tab: Tab; dir: string; depth: 
 
 /** One file, to read and to change. What the agent changes meanwhile is shown unless the owner has typed. */
 function FileView({ tab, file, close }: { tab: Tab; file: string; close: () => void }) {
-	const disk = useLoad(() => api.file(tab.agent, tab.session, file), [tab.key, file, tab.codeTick]);
+	const disk = useLoad(() => apiFor(tab.env).file(tab.agent, tab.session, file), [tab.key, file, tab.codeTick]);
 	const [draft, setDraft] = useState<string>();
 	const [saving, setSaving] = useState(false);
 	const [base, setBase] = useState<string>();
@@ -352,7 +352,7 @@ function FileView({ tab, file, close }: { tab: Tab; file: string; close: () => v
 		if (!dirty || saving) return;
 		setSaving(true);
 		try {
-			await api.writeFile(tab.agent, tab.session, file, draft!);
+			await apiFor(tab.env).writeFile(tab.agent, tab.session, file, draft!);
 			setBase(draft);
 			tab.codeTick++;
 			tab.touch();
@@ -403,7 +403,7 @@ function FileView({ tab, file, close }: { tab: Tab; file: string; close: () => v
 			) : (
 			<ScrollArea className="flex min-h-0 flex-1 flex-col *:data-[slot=scroll-area-viewport]:scroll-fade"><div className="flex min-h-full flex-col">
 				{kind ? (
-					<div className="p-3.5">{kind === "image" ? <img className={PICTURE} src={media.workspace(tab.agent, file, tab.session)} alt={file} /> : kind === "video" ? <video className="block max-h-90 max-w-full rounded-lg bg-black sm:max-w-lg" src={media.workspace(tab.agent, file, tab.session)} controls /> : <audio className="block w-full max-w-md" src={media.workspace(tab.agent, file, tab.session)} controls />}</div>
+					<div className="p-3.5">{kind === "image" ? <img className={PICTURE} src={media.workspace(tab.env, tab.agent, file, tab.session)} alt={file} /> : kind === "video" ? <video className="block max-h-90 max-w-full rounded-lg bg-black sm:max-w-lg" src={media.workspace(tab.env, tab.agent, file, tab.session)} controls /> : <audio className="block w-full max-w-md" src={media.workspace(tab.env, tab.agent, file, tab.session)} controls />}</div>
 				) : disk.error ? (
 					<EmptyView icon={FileIcon} title="This file cannot be shown">{disk.error}</EmptyView>
 				) : !disk.data ? (
@@ -420,7 +420,7 @@ function FileView({ tab, file, close }: { tab: Tab; file: string; close: () => v
 function Files({ tab, file, setFile }: { tab: Tab; file?: string; setFile: (file?: string) => void }) {
 	const [tick, setTick] = useState(0);
 	const [query, setQuery] = useState("");
-	const found = useLoad(async () => (query.trim() ? (await api.find(tab.agent, tab.session, query.trim())).files : undefined), [tab.key, query]);
+	const found = useLoad(async () => (query.trim() ? (await apiFor(tab.env).find(tab.agent, tab.session, query.trim())).files : undefined), [tab.key, query]);
 	useEffect(() => setTick((n) => n + 1), [tab.codeTick]);
 	if (file) return <FileView tab={tab} file={file} close={() => setFile(undefined)} />;
 	const root = tab.folder ?? tab.workspace;
@@ -449,10 +449,10 @@ function Files({ tab, file, setFile }: { tab: Tab; file?: string; setFile: (file
 /** The tool calls of the last messages, each with what it printed. */
 function Output({ tab }: { tab: Tab }) {
 	const calls = useLoad(async () => {
-		const tasks = (await api.history(tab.agent, tab.session, 8)).filter((x) => x.depth === 0 && !x.meta?.compact);
+		const tasks = (await apiFor(tab.env).history(tab.agent, tab.session, 8)).filter((x) => x.depth === 0 && !x.meta?.compact);
 		const out: Array<{ task: number; n: number; entry: TranscriptEntry }> = [];
 		for (const task of tasks) {
-			const entries = (await api.transcript(task.id, true).catch(() => undefined))?.entries ?? [];
+			const entries = (await apiFor(tab.env).transcript(task.id, true).catch(() => undefined))?.entries ?? [];
 			entries.filter((e) => e.kind === "tool").forEach((entry, n) => out.push({ task: task.id, n, entry }));
 		}
 		return out;
@@ -471,7 +471,7 @@ function Output({ tab }: { tab: Tab }) {
 				</div>
 				<ScrollArea className="flex min-h-0 flex-1 flex-col *:data-[slot=scroll-area-viewport]:scroll-fade"><div className="flex min-h-full flex-col">
 					<Printed text={shown.entry.result || "(it printed nothing)"} failed={shown.entry.ok === false} className="m-2" />
-					{(shown.entry.images ?? []).map((id) => <div className="p-3" key={id}><img className={PICTURE} src={media.tool(id)} alt="" /></div>)}
+					{(shown.entry.images ?? []).map((id) => <div className="p-3" key={id}><img className={PICTURE} src={media.tool(tab.env, id)} alt="" /></div>)}
 				</div></ScrollArea>
 			</>
 		);
@@ -524,7 +524,7 @@ function Running({ tab }: { tab: Tab }) {
 									</AlertDialogHeader>
 									<AlertDialogFooter>
 										<AlertDialogCancel>Cancel</AlertDialogCancel>
-										<AlertDialogCancel variant="destructive" onClick={() => void store.attempt(() => api.stopProgram(tab.agent, tab.session, p.id)).then(() => store.flash("Stopping…"))}>Stop</AlertDialogCancel>
+										<AlertDialogCancel variant="destructive" onClick={() => void store.attempt(() => apiFor(tab.env).stopProgram(tab.agent, tab.session, p.id)).then(() => store.flash("Stopping…"))}>Stop</AlertDialogCancel>
 									</AlertDialogFooter>
 								</AlertDialogContent>
 							</AlertDialog>

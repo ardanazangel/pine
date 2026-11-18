@@ -8,7 +8,7 @@ import { MessageScroller, MessageScrollerContent, MessageScrollerProvider, Messa
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Printed } from "@/components/printed";
 import { useEffect, useState } from "react";
-import { api, type PineEvent } from "./api.ts";
+import { apiFor, type PineEvent } from "./api.ts";
 import { store, type Tab, useModel } from "./model.ts";
 import { short } from "./text.ts";
 import { EmptyView } from "@/components/empty-view";
@@ -50,7 +50,7 @@ export function Events({ tab }: { tab: Tab }) {
 				return store.flash("The payload is not JSON.", "bad");
 			}
 		}
-		const done = await store.attempt(() => api.emit(at > 0 ? topic.slice(0, at) : topic, payload));
+		const done = await store.attempt(() => apiFor(tab.env).emit(at > 0 ? topic.slice(0, at) : topic, payload));
 		if (done) store.flash(`Published event #${done.id}.`);
 	};
 	return (

@@ -24,6 +24,8 @@ let app: any;
 let page: any;
 let mock: any;
 let home: string;
+/** The pine home of "another machine": reached through a stand-in for ssh. */
+let far: string;
 let folder: string;
 /** Where the browser of the web tools would lie (Playwright's own variable for it): a folder of the test's, empty at the start. */
 let browsers: string;
@@ -102,6 +104,50 @@ process.stdin.resume();
 	});
 	await new Promise<void>((r) => github.listen(0, "127.0.0.1", r));
 
+	// Another machine, as the app reaches it: a stand-in for ssh that runs `pine service` on a home
+	// of its own as the master of a control socket, and through that socket binds the port that
+	// `-O forward -L` asks for, or says it cannot, as ssh does.
+	far = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pine-desktop-far-")));
+	write(path.join(far, "models.json"), fs.readFileSync(path.join(home, "models.json"), "utf8"));
+	write(path.join(far, "pine.json"), JSON.stringify({ http: { host: "127.0.0.1", port: 0 }, main: "main", defaults: { model: "mock/m", mode: "safe" }, security: { askAccess: false } }, null, 2));
+	write(path.join(far, "agents", "main", "agent.json"), JSON.stringify({ description: "The main agent of the other machine" }));
+	write(path.join(far, "agents", "main", "workspace", "AGENTS.md"), "You are the main agent there.\n");
+	write(path.join(far, "agents", "helper", "agent.json"), JSON.stringify({ description: "Helps on the other machine" }));
+	write(path.join(far, "agents", "helper", "workspace", "AGENTS.md"), "You are helper.\n");
+	const ssh = path.join(home, "ssh-stand-in.mjs");
+	write(ssh, `#!${process.execPath}
+import { spawn } from "node:child_process";
+import net from "node:net";
+const args = process.argv.slice(2);
+const opt = (name) => args.map((a, i) => args[i - 1] === "-o" && a.startsWith(name + "=") ? a.slice(name.length + 1) : undefined).find(Boolean);
+const control = opt("ControlPath");
+if (args.includes("-O")) {
+	const c = net.connect(control);
+	let reply = "";
+	c.on("data", (d) => (reply += d));
+	c.on("end", () => { if (reply.startsWith("ok")) process.exit(0); console.error("mux_client_forward: forwarding request failed: " + reply.slice(5).trim()); process.exit(255); });
+	c.on("error", (e) => { console.error("Control socket connect: " + e.message); process.exit(255); });
+	c.end(args[args.indexOf("-L") + 1] + "\\n");
+} else {
+	if (!/exec \\/bin\\/sh -c '.*pine service && exec cat/.test(args.at(-1) ?? "")) { console.error("not the command the app runs"); process.exit(2); }
+	if (opt("ControlMaster") === "yes") net.createServer((c) => c.once("data", (d) => {
+		const [, port, toHost, toPort] = String(d).trim().split(":");
+		const server = net.createServer((s) => { const to = net.connect(Number(toPort), toHost); s.pipe(to).pipe(s); s.on("error", () => to.destroy()); to.on("error", () => s.destroy()); });
+		server.once("error", () => c.end("fail Port forwarding failed"));
+		server.listen(Number(port), "127.0.0.1", () => c.end("ok"));
+	})).listen(control);
+	const child = spawn(${JSON.stringify(process.execPath)}, [${JSON.stringify(path.resolve(root, "..", "bin", "pine.js"))}, "service", "--home", ${JSON.stringify(far)}], { stdio: "inherit", env: { ...process.env, PINE_SKIP_DOWNLOADS: "1" } });
+	let running = true;
+	let ending = false;
+	process.on("SIGTERM", () => { ending = true; if (running) child.kill("SIGTERM"); else process.exit(0); });
+	// As "pine service && exec cat": after a service that attached, the session lasts until stdin ends.
+	child.on("exit", (code) => { running = false; if (code || ending) process.exit(code ?? 0); });
+	process.stdin.on("end", () => (running ? child.on("exit", () => process.exit(0)) : process.exit(0)));
+	process.stdin.resume();
+}
+`);
+	fs.chmodSync(ssh, 0o755);
+
 	// PINE_DESKTOP_THEME=dark|light: the pictures in that appearance, whatever the system is set to.
 	if (process.env.PINE_DESKTOP_THEME) write(path.join(home, "desktop-data", "prefs.json"), JSON.stringify({ theme: process.env.PINE_DESKTOP_THEME }));
 
@@ -109,7 +155,7 @@ process.stdin.resume();
 		// (The driver shows every page in light unless it is told otherwise, whatever the app says.)
 		colorScheme: process.env.PINE_DESKTOP_THEME === "dark" ? "dark" : "light",
 		args: [root],
-		env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsers, PINE_HOME: home, PINE_DESKTOP_DATA: path.join(home, "desktop-data"), PINE_SKIP_DOWNLOADS: "1", PINE_DESKTOP_DEV_URL: "", PINE_DESKTOP_VOICE: voice, PINE_DESKTOP_RELEASES: `http://127.0.0.1:${(github.address() as any).port}/repos/pmndre/pine/releases/latest` },
+		env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsers, PINE_HOME: home, PINE_DESKTOP_DATA: path.join(home, "desktop-data"), PINE_SKIP_DOWNLOADS: "1", PINE_DESKTOP_DEV_URL: "", PINE_DESKTOP_VOICE: voice, PINE_DESKTOP_RELEASES: `http://127.0.0.1:${(github.address() as any).port}/repos/pmndre/pine/releases/latest`, PINE_DESKTOP_SSH: ssh },
 	});
 	page = await app.firstWindow();
 	page.on("pageerror", (e: Error) => pageErrors.push(String(e.stack ?? e.message).slice(0, 600)));
@@ -121,7 +167,7 @@ after(async () => {
 	await app?.close().catch(() => {});
 	await mock?.close?.().catch(() => {});
 	github?.close();
-	for (const dir of [home, folder]) if (dir) fs.rmSync(dir, { recursive: true, force: true });
+	for (const dir of [home, far, folder]) if (dir) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 /** The context window of the mock model (models.json above). */
@@ -496,7 +542,7 @@ test("what an answer points at on the web is not fetched by itself, and what it 
 	assert.equal(await md.locator('img[src^="http"]').count(), 0);
 	// A small picture in the text itself is shown, and one in the workspace comes from the daemon.
 	assert.equal(await md.locator('img[src^="data:image/png"]').count(), 1);
-	assert.match((await md.locator('img[alt="the plan"]').getAttribute("src")) ?? "", /^pine-media:\/\/daemon\/.*plan\.png/);
+	assert.match((await md.locator('img[alt="the plan"]').getAttribute("src")) ?? "", /^pine-media:\/\/local\/.*plan\.png/);
 	// Nothing to download a picture with.
 	assert.equal(await md.locator('button[title*="ownload"], button[aria-label*="ownload"]').count(), 0);
 	// What could act or restyle is gone, and the words stay. The one svg allowed is pine's own arrow beside a link.
@@ -976,6 +1022,18 @@ test("settings: a setting is changed, an agent made, a schedule added, a provide
 	await page.click("[role=navigation] [data-sidebar=menu-button] >> text=Models");
 	await page.click("[role=navigation] [data-sidebar=menu-button] >> text=App");
 	await sees("[data-setting=browser] [data-slot=badge][data-variant=default] >> text=on this Mac");
+	// Environments: this computer is on and connected; a machine that is not one for ssh is refused at once, and nothing changes.
+	await page.click("[role=navigation] [data-sidebar=menu-button] >> text=Environments");
+	await sees("[data-slot=settings-page] h1 >> text=Environments");
+	await sees("[data-slot=item][data-environment=local] [data-slot=item-title] >> text=This Mac");
+	await sees("[data-slot=item][data-environment=local] [data-slot=badge][data-variant=default] >> text=connected");
+	await page.fill("[data-slot=settings-page] input[placeholder='user@host']", "-oProxyCommand=x");
+	await page.locator("[data-slot=settings-page]").getByRole("button", { name: "Add and connect" }).click();
+	await sees("[data-slot=settings-page] [data-slot=field-error] >> text=is not a host for ssh");
+	await sees("[data-slot=sidebar-group][data-environment=local] [data-slot=environment-label] >> text=This Mac");
+	assert.deepEqual((await page.evaluate(() => (window as any).pine.state())).prefs.environments, [{ id: "local", enabled: true }]);
+	await page.fill("[data-slot=settings-page] input[placeholder='user@host']", "");
+	await shot("09-settings-environments");
 	await menu("settings");
 });
 
@@ -1454,6 +1512,71 @@ test("the panel's Agent view scrolls up and down only, however narrow the panel 
 	await page.mouse.down();
 	await page.mouse.move(back.x + back.width / 2 - (was - (await width())), 300, { steps: 6 });
 	await page.mouse.up();
+});
+
+test("another machine is added: its agents stand beside these, and a conversation of each is open at once", async () => {
+	await menu("settings:environments");
+	await sees("[data-slot=settings-page] h1 >> text=Environments");
+	await page.fill("[data-slot=settings-page] input[placeholder='user@host']", "you@elsewhere");
+	await page.locator("[data-slot=settings-page]").getByRole("button", { name: "Add and connect" }).click();
+	// It connects at once, and its agents appear under its name, without a restart.
+	const there = "[data-slot=sidebar-group][data-environment=ssh-you-elsewhere]";
+	const names = (within: string) => page.$$eval(`${within} [data-slot=agent-label] > :first-child`, (els: Element[]) => els.map((e) => e.textContent?.trim()));
+	await sees(`${there} [data-slot=agent-label] >> text=helper`, 60_000);
+	assert.deepEqual(await page.$$eval("[data-slot=sidebar-group][data-environment] [data-slot=environment-label]", (els: Element[]) => els.map((e) => e.textContent)), ["This Mac", "elsewhere"]);
+	assert.deepEqual(await names(there), ["main", "helper"]);
+	assert.deepEqual(await names("[data-slot=sidebar-group][data-environment=local]"), ["main", "scout", "books", "test"]);
+	await sees("[data-slot=item][data-environment=ssh-you-elsewhere] [data-slot=badge][data-variant=default] >> text=connected");
+	await shot("16-environments");
+	// Both have a "main": the other machine's opens in a tab of its own, which says where it is.
+	await page.locator(`${there} [data-slot=collapsible]`, { has: page.locator("[data-slot=agent-label] > :first-child", { hasText: /^main$/ }) }).locator("[role=option]").first().click();
+	await sees("[data-slot=tab][data-active] [data-slot=tab-where] >> text=elsewhere");
+	await sees("[data-slot=conversation-head] >> text=elsewhere");
+	assert.equal(await page.textContent("[data-slot=empty] h1"), "main");
+	assert.match(await page.textContent("[data-slot=empty]"), /main agent of the other machine/);
+	await page.fill("[data-slot=composer] textarea", "hello from this side");
+	await page.keyboard.press("Enter");
+	await sees("[data-slot=markdown] >> text=ECHO[hello from this side]");
+	// It went to the other machine's pine, and not to this one's.
+	const daemon = (dir: string) => ({ port: /http listening on 127\.0\.0\.1:(\d+)/.exec(fs.readFileSync(path.join(dir, "data", "pine.log"), "utf8"))![1], token: fs.readFileSync(path.join(dir, "data", "http-token"), "utf8").trim() });
+	const said = async (dir: string) => {
+		const d = daemon(dir);
+		const tasks = (await (await fetch(`http://127.0.0.1:${d.port}/tasks?agent=main&limit=100`, { headers: { authorization: `Bearer ${d.token}` } })).json()) as Array<{ prompt: string }>;
+		return tasks.some((t) => t.prompt === "hello from this side");
+	};
+	assert.equal(await said(far), true);
+	assert.equal(await said(home), false);
+	await shot("17-two-environments");
+	// This computer's main is a tab beside it, and still its own conversation.
+	await page.locator("[data-slot=tab]", { hasNot: page.locator("[data-slot=tab-where]") }).filter({ has: page.locator("[data-slot=tab-name] b", { hasText: /^main$/ }) }).first().click();
+	await sees("[data-slot=tab][data-active] [data-slot=tab-name] b >> text=main");
+	assert.equal(await page.locator("[data-slot=tab][data-active] [data-slot=tab-where]").count(), 0);
+	assert.doesNotMatch(await page.textContent("[data-slot=message-scroller]"), /hello from this side/);
+	// The settings pages are of the environment chosen at their top.
+	await menu("settings:agents");
+	await page.click("#settings-environment");
+	await page.click("[data-slot=select-item] >> text=elsewhere");
+	await sees("[data-slot=settings-page] [data-slot=item-title] >> text=helper");
+	assert.equal(await page.locator("[data-slot=settings-page] [data-slot=item-title] >> text=scout").count(), 0);
+	// Turned off: its agents and its tabs go, this computer's stay; it is kept in the list, off.
+	const port = daemon(far).port;
+	await page.click("[role=navigation] [data-sidebar=menu-button] >> text=Environments");
+	await page.click("[data-slot=item][data-environment=ssh-you-elsewhere] [data-slot=switch]");
+	await page.waitForSelector(there, { state: "detached" });
+	await sees("[data-slot=sidebar-group][data-environment=local] [data-slot=agent-label] >> text=scout");
+	assert.equal(await page.locator("[data-slot=tab-where]").count(), 0);
+	assert.deepEqual((await page.evaluate(() => (window as any).pine.state())).prefs.environments, [{ id: "local", enabled: true }, { id: "ssh-you-elsewhere", host: "you@elsewhere", enabled: false }]);
+	// The pine this app started there for it is stopped with it.
+	let up = true;
+	for (let i = 0; i < 100 && up; i++) {
+		up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(300) }).then((r) => r.ok, () => false);
+		if (up) await new Promise((r) => setTimeout(r, 150));
+	}
+	assert.equal(up, false);
+	// The last one that is on stays on.
+	await page.click("[data-slot=item][data-environment=local] [data-slot=switch]");
+	await sees("[data-slot=toast] >> text=One environment stays on");
+	await menu("settings");
 });
 
 test("quitting stops the daemon it started", async () => {

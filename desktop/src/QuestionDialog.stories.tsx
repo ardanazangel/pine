@@ -6,6 +6,6 @@ const meta = { component: Dialog, tags: ["!autodocs"], parameters: { layout: "fu
 export default meta;
 
 type Story = StoryObj<typeof meta>;
-const question: Story["args"] = { req: { id: "q1", agent: "main", task: 12, tool: "question", summary: "Which database?", why: "", expires: 0, choices: ["the old one", "the new one"] } };
+const question: Story["args"] = { env: "local", req: { id: "q1", agent: "main", task: 12, tool: "question", summary: "Which database?", why: "", expires: 0, choices: ["the old one", "the new one"] } };
 
 export const QuestionDialog: Story = { args: question };

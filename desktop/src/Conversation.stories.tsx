@@ -8,7 +8,7 @@ import { type Item, Tab } from "./model.ts";
 type Made = Item extends infer I ? (I extends Item ? Omit<I, "id" | "v"> : never) : never;
 
 function Items({ items }: { items: Made[] }) {
-	const tab = new Tab("chat", "main", "main");
+	const tab = new Tab("chat", "local", "main", "main");
 	for (const item of items) tab.add(item as never);
 	return (
 		<div className="flex w-160 flex-col gap-3.5">

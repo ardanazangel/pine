@@ -1,7 +1,7 @@
 // The window: the list of agents and conversations at the side, the tabs along the top, one
 // conversation in the middle with its panel, and whatever lies over them for a moment (a list
 // to pick from, a question, the palette).
-import { ArrowUpIcon, AudioLinesIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, ExternalLinkIcon, FolderIcon, GitBranchIcon, ListIcon, MessageSquareIcon, PanelLeftIcon, PlusIcon, SearchIcon, SettingsIcon, StarIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArrowUpIcon, AudioLinesIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CpuIcon, ExternalLinkIcon, FolderIcon, GitBranchIcon, ListIcon, MessageSquareIcon, PanelLeftIcon, PlusIcon, SearchIcon, SettingsIcon, StarIcon, TerminalIcon, Trash2Icon, XIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -12,13 +12,13 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "cn";
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { type AgentInfo, api, type Conversation as Conv } from "./api.ts";
+import { type AgentInfo, apiFor, type Conversation as Conv } from "./api.ts";
 import { bridge } from "./bridge.ts";
 import { CODE_KEY, CodePanel } from "./CodePanel.tsx";
 import { COMMANDS } from "./commands.ts";
 import { Conversation } from "./Conversation.tsx";
 import { Events } from "./Events.tsx";
-import { store, type Tab, useModel, useSignal } from "./model.ts";
+import { type Env, store, type Tab, useModel, useSignal } from "./model.ts";
 import { Settings } from "./Settings.tsx";
 import { ApprovalDialog } from "./ApprovalDialog.tsx";
 import { Palette } from "./Palette.tsx";
@@ -42,9 +42,11 @@ const DOT = "size-2 flex-none rounded-full";
 
 // ---- before pine answers -----------------------------------------------------------------------------
 
+/** Until one pine answers: each environment that is on, and how far it got. */
 function Gate() {
 	const s = useModel(store);
-	const state = s.service;
+	const envs = s.shown;
+	const state = envs.find((e) => e.id === "local")?.service;
 	const init = async () => {
 		s.initRunning = true;
 		s.initLines = [];
@@ -52,47 +54,73 @@ function Gate() {
 		const code = await bridge.init().catch(() => 1);
 		s.initRunning = false;
 		s.touch();
-		if (code === 0) await bridge.retry();
+		if (code === 0) await bridge.retry("local");
 		else s.flash("pine init did not finish. What it said is shown above.", "bad");
 	};
-	const [title, about, actions]: [string, React.ReactNode, React.ReactNode] =
-		state.status === "starting"
-			? ["Starting pine", "Looking for a running pine, or starting one…", <Spinner key="s" />]
-			: state.status === "error" && state.kind === "no-home"
-				? [
-						"Welcome to pine",
-						`pine keeps its agents, their workspaces and its settings in a home folder (${s.prefs.home ?? s.home ?? "~/.pine"}). There is none yet. Setting it up copies the example home and fetches the browser its web tools drive (about 600 MB, once).`,
-						<>
-							{s.initLines.length ? <Printed sm className="w-full text-start" text={s.initLines.slice(-40).join("\n")} /> : null}
-							<div className="flex items-center gap-2">
-								<Button disabled={s.initRunning} onClick={() => void init()}>{s.initRunning ? <><Spinner data-icon="inline-start" />Setting up…</> : "Set up pine"}</Button>
-								<Button variant="outline" disabled={s.initRunning} onClick={() => void bridge.retry()}>Try again</Button>
-							</div>
-						</>,
-					]
-				: state.status === "error"
-					? [
-							state.kind === "no-node" ? "pine needs Node" : state.kind === "no-pine" ? "pine is not installed" : "pine did not start",
-							state.message,
-							<div key="b" className="flex items-center gap-2">
-								<Button onClick={() => void bridge.retry()}>Try again</Button>
-								{state.kind === "no-node" ? <Button variant="outline" onClick={() => void bridge.open("https://nodejs.org")}>nodejs.org</Button> : null}
-							</div>,
-						]
-					: ["Loading your agents…", "", <Spinner key="s" />];
 	// Before pine answers there is nothing to show yet: stock Empty, in a frame that moves the window.
 	return (
 		<div className="m-1.5 flex flex-1 rounded-xl border bg-background app-drag">
 			<Empty className="app-no-drag">
-				<EmptyHeader>
-					<EmptyMedia>
-						<Logo className="size-9" />
-					</EmptyMedia>
-					<EmptyTitle>{title}</EmptyTitle>
-					{about ? <EmptyDescription className="select-text">{about}</EmptyDescription> : null}
-				</EmptyHeader>
-				<EmptyContent>{actions}</EmptyContent>
+				{state?.status === "error" && state.kind === "no-home" ? (
+					<>
+						<EmptyHeader>
+							<EmptyMedia>
+								<Logo className="size-9" />
+							</EmptyMedia>
+							<EmptyTitle>Welcome to pine</EmptyTitle>
+							<EmptyDescription className="select-text">{`pine keeps its agents, their workspaces and its settings in a home folder (${s.prefs.home ?? s.home ?? "~/.pine"}). There is none yet. Setting it up copies the example home and fetches the browser its web tools drive (about 600 MB, once).`}</EmptyDescription>
+						</EmptyHeader>
+						<EmptyContent>
+							{s.initLines.length ? <Printed sm className="w-full text-start" text={s.initLines.slice(-40).join("\n")} /> : null}
+							<div className="flex items-center gap-2">
+								<Button disabled={s.initRunning} onClick={() => void init()}>{s.initRunning ? <><Spinner data-icon="inline-start" />Setting up…</> : "Set up pine"}</Button>
+								<Button variant="outline" disabled={s.initRunning} onClick={() => void bridge.retry("local")}>Try again</Button>
+							</div>
+						</EmptyContent>
+					</>
+				) : (
+					<>
+						<EmptyMedia>
+							<Logo className="size-9" />
+						</EmptyMedia>
+						{envs.map((e) => <GateLine key={e.id} e={e} />)}
+					</>
+				)}
 			</Empty>
+		</div>
+	);
+}
+
+/** How far one environment's pine got: still on its way, or what went wrong and what to do. */
+function GateLine({ e }: { e: Env }) {
+	const s = store;
+	const state = e.service;
+	// Another machine that is not reached, and this computer is off: it can be the one instead.
+	const instead = async () => {
+		await bridge.enableEnvironment("local", true);
+		await bridge.enableEnvironment(e.id, false);
+	};
+	const [title, about, actions]: [string, string, React.ReactNode] =
+		state.status === "starting"
+			? ["Starting pine", e.host ? `Connecting to the pine on ${e.label} over SSH…` : "Looking for a running pine, or starting one…", <Spinner key="s" />]
+			: state.status === "ready"
+				? [`Loading the agents${s.on(e.id)}…`, "", <Spinner key="s" />]
+				: [
+						state.kind === "no-node" ? "pine needs Node" : state.kind === "no-pine" ? "pine is not installed" : state.kind === "ssh" ? `pine on ${e.label} is not reached over SSH` : e.host ? `pine on ${e.label} did not start` : "pine did not start",
+						state.message,
+						<div key="b" className="flex items-center gap-2">
+							<Button onClick={() => void bridge.retry(e.id)}>Try again</Button>
+							{state.kind === "no-node" ? <Button variant="outline" onClick={() => void bridge.open("https://nodejs.org")}>nodejs.org</Button> : null}
+							{e.host && !s.env("local")?.enabled ? <Button variant="outline" onClick={() => void instead()}>Use this Mac</Button> : null}
+						</div>,
+					];
+	return (
+		<div data-environment={e.id} className="flex flex-col items-center gap-4">
+			<EmptyHeader>
+				<EmptyTitle>{title}</EmptyTitle>
+				{about ? <EmptyDescription className="select-text">{about}</EmptyDescription> : null}
+			</EmptyHeader>
+			<EmptyContent>{actions}</EmptyContent>
 		</div>
 	);
 }
@@ -105,9 +133,9 @@ function Gate() {
 /** How far a conversation's row stands in: a branch under the one it was made from, four steps at most. */
 const INDENT = ["pl-10", "pl-14", "pl-18", "pl-22", "pl-26"];
 
-function ConversationRow({ agent, c, depth = 0 }: { agent: string; c: Conv; depth?: number }) {
+function ConversationRow({ env, agent, c, depth = 0 }: { env: string; agent: string; c: Conv; depth?: number }) {
 	const s = store;
-	const tab = s.tabs.find((t) => t.kind === "chat" && t.agent === agent && t.session === c.session);
+	const tab = s.tabs.find((t) => t.kind === "chat" && t.env === env && t.agent === agent && t.session === c.session);
 	const main = c.session === "main";
 	const menu = async () => {
 		const picked = await bridge.contextMenu([
@@ -119,38 +147,38 @@ function ConversationRow({ agent, c, depth = 0 }: { agent: string; c: Conv; dept
 			{ id: "sep", label: "", separator: true },
 			main ? { id: "reset", label: "Start over…" } : { id: "remove", label: "Remove…" },
 		]);
-		if (picked === "open") await s.openTab(agent, c.session);
-		if (picked === "branch" || picked === "branch-worktree") await s.branch(agent, c.session, undefined, picked === "branch-worktree");
+		if (picked === "open") await s.openTab(env, agent, c.session);
+		if (picked === "branch" || picked === "branch-worktree") await s.branch(env, agent, c.session, undefined, picked === "branch-worktree");
 		if (picked === "worktree") {
-			await s.openTab(agent, c.session);
+			await s.openTab(env, agent, c.session);
 			if (s.active?.kind === "chat") await s.worktreeMenu(s.active);
 		}
 		if (picked === "pin") {
-			await s.attempt(() => api.pinSession(agent, c.session, !c.pinned));
-			await s.refreshConversations(agent);
+			await s.attempt(() => apiFor(env).pinSession(agent, c.session, !c.pinned));
+			await s.refreshConversations(s.env(env), agent);
 		}
 		if (picked === "rename") {
 			const to = await s.pick({ title: `Another name for ${c.session}`, items: [], free: true, placeholder: "The new name" });
-			if (to?.trim()) await s.rename(agent, c.session, to.trim());
+			if (to?.trim()) await s.rename(env, agent, c.session, to.trim());
 		}
 		if (picked === "remove") {
-			const sure = await s.pick({ title: `Remove the conversation ${c.session} of ${agent}?`, items: [{ value: "yes", label: "Remove it for good", about: "Its history, what it may do without asking, what it listens to and whatever was set up for it alone all go.", tone: "bad" }, { value: "no", label: "Cancel" }] });
-			if (sure === "yes") await s.removeConversation(agent, c.session);
+			const sure = await s.pick({ title: `Remove the conversation ${c.session} of ${agent}${s.on(env)}?`, items: [{ value: "yes", label: "Remove it for good", about: "Its history, what it may do without asking, what it listens to and whatever was set up for it alone all go.", tone: "bad" }, { value: "no", label: "Cancel" }] });
+			if (sure === "yes") await s.removeConversation(env, agent, c.session);
 		}
 		if (picked === "reset") {
-			await s.openTab(agent, c.session);
+			await s.openTab(env, agent, c.session);
 			if (s.active) await s.reset(s.active);
 		}
 	};
 	const kept = main ? "the agent's own, always kept" : c.pinned ? "pinned" : c.open ? "open in a tab" : c.expires ? `goes ${until(c.expires)}` : "kept";
-	const working = tab?.busy || s.isBusy(agent, c.session);
+	const working = tab?.busy || s.isBusy(env, agent, c.session);
 	const on = Boolean(tab && tab === s.active);
 	return (
 		// The row is the stock menu button drawn as the list's option, so the list keeps its one tab stop and its arrows.
 		<SidebarMenuItem role="none" className="app-no-drag" onContextMenu={(e) => (e.preventDefault(), void menu())}>
-			<SidebarMenuButton isActive={on} className={cn(INDENT[Math.min(depth, INDENT.length - 1)], c.tasks && "pr-16 group-has-data-[sidebar=menu-action]/menu-item:pr-16")} render={<ListboxItem value={c.session} label={s.titleOf(agent, c.session)} title={`${agent} · ${c.session} · ${kept}${c.branch ? ` · a branch of ${c.branch.from}` : ""}${c.worktree ? ` · in the worktree ${c.worktree.branch} of ${c.worktree.repo}` : c.folder ? ` · works in ${c.folder}` : ""}`} />}>
+			<SidebarMenuButton isActive={on} className={cn(INDENT[Math.min(depth, INDENT.length - 1)], c.tasks && "pr-16 group-has-data-[sidebar=menu-action]/menu-item:pr-16")} render={<ListboxItem value={c.session} label={s.titleOf(env, agent, c.session)} title={`${agent}${s.on(env)} · ${c.session} · ${kept}${c.branch ? ` · a branch of ${c.branch.from}` : ""}${c.worktree ? ` · in the worktree ${c.worktree.branch} of ${c.worktree.repo}` : c.folder ? ` · works in ${c.folder}` : ""}`} />}>
 				<span className="grid size-4 flex-none place-items-center">{tab?.approvals.size ? <Badge variant="destructive" className="size-4 p-0">!</Badge> : working ? <Spinner aria-label="Working" className="size-3" /> : tab?.unread ? <Badge className="size-2 p-0" /> : main || c.pinned ? <StarIcon className="text-faint" /> : depth || c.worktree ? <GitBranchIcon className="text-faint" /> : c.folder ? <FolderIcon className="text-faint" /> : <MessageSquareIcon className="text-faint" />}</span>
-				<span className="min-w-0 flex-1">{s.titleOf(agent, c.session)}</span>
+				<span className="min-w-0 flex-1">{s.titleOf(env, agent, c.session)}</span>
 			</SidebarMenuButton>
 			{/* The badge is drawn over the button, so the button keeps the room for the time (stock pr-8 fits an action alone; the same selector as stock, so it takes the place of its pr-8). */}
 			{c.tasks ? <SidebarMenuBadge className={cn(!main && "group-hover/menu-item:hidden")}>{ago(c.last).replace(" ago", "")}</SidebarMenuBadge> : null}
@@ -163,11 +191,11 @@ function ConversationRow({ agent, c, depth = 0 }: { agent: string; c: Conv; dept
 					</Tooltip>
 					<AlertDialogContent>
 						<AlertDialogHeader>
-							<AlertDialogTitle>Remove the conversation {s.titleOf(agent, c.session)} for good?</AlertDialogTitle>
+							<AlertDialogTitle>Remove the conversation {s.titleOf(env, agent, c.session)} for good?</AlertDialogTitle>
 						</AlertDialogHeader>
 						<AlertDialogFooter>
 							<AlertDialogCancel>Cancel</AlertDialogCancel>
-							<AlertDialogCancel variant="destructive" onClick={() => void s.removeConversation(agent, c.session)}>Remove</AlertDialogCancel>
+							<AlertDialogCancel variant="destructive" onClick={() => void s.removeConversation(env, agent, c.session)}>Remove</AlertDialogCancel>
 						</AlertDialogFooter>
 					</AlertDialogContent>
 				</AlertDialog>
@@ -195,22 +223,23 @@ function threaded(rows: Conv[]): Array<{ c: Conv; depth: number }> {
 	return out;
 }
 
-function AgentGroup({ a }: { a: AgentInfo }) {
+function AgentGroup({ env, a }: { env: Env; a: AgentInfo }) {
 	const s = store;
-	const folded = s.folded.has(a.id);
-	const list = s.conversations.get(a.id) ?? [];
+	const folded = s.isFolded(env.id, a.id);
+	const list = env.conversations.get(a.id) ?? [];
+	const who = { env: env.id, agent: a.id };
 	// The agent's own conversation first, then what is pinned, then by when it was last used.
 	const sorted = [...list].sort((x, y) => Number(y.session === "main") - Number(x.session === "main") || Number(y.pinned) - Number(x.pinned) || y.last - x.last);
 	const rows = sorted.some((c) => c.session === "main") ? sorted : [{ session: "main", tasks: 0, last: 0, pinned: false, open: false }, ...sorted];
 	// A conversation that is open in a tab and has not been said anything in yet is not in the daemon's list.
-	for (const t of s.tabs) if (t.kind === "chat" && t.agent === a.id && !rows.some((c) => c.session === t.session)) rows.push({ session: t.session, tasks: 0, last: Date.now(), pinned: false, open: true });
-	const tabs = s.tabs.filter((t) => t.agent === a.id && t.kind === "chat");
+	const tabs = s.tabsOf(env.id).filter((t) => t.agent === a.id && t.kind === "chat");
+	for (const t of tabs) if (!rows.some((c) => c.session === t.session)) rows.push({ session: t.session, tasks: 0, last: Date.now(), pinned: false, open: true });
 	const waits = tabs.some((t) => t.approvals.size > 0);
-	const working = s.isBusy(a.id) || tabs.some((t) => t.busy);
+	const working = s.isBusy(env.id, a.id) || tabs.some((t) => t.busy);
 	const unread = tabs.some((t) => t.unread);
 	const pickFolder = async () => {
-		const dir = await bridge.pickFolder(`A folder for a conversation with ${a.id}`);
-		if (dir) await s.openFolder(dir, a.id);
+		const dir = await s.chooseFolder(env.id, `A folder for a conversation with ${a.id}`);
+		if (dir) await s.openFolder(dir, who);
 	};
 	const menu = async () => {
 		const picked = await bridge.contextMenu([
@@ -221,15 +250,15 @@ function AgentGroup({ a }: { a: AgentInfo }) {
 			// The main agent administers pine and stays.
 			...(a.main ? [] : [{ id: "sep2", label: "", separator: true }, { id: "remove", label: `Remove ${a.id}…` }]),
 		]);
-		if (picked === "new") await s.newConversation(a.id);
+		if (picked === "new") await s.newConversation(who);
 		if (picked === "folder") await pickFolder();
-		if (picked === "settings") s.openSettings("agents", a.id);
-		if (picked === "remove") await s.removeAgent(a.id);
+		if (picked === "settings") s.openSettings("agents", a.id, env.id);
+		if (picked === "remove") await s.removeAgent(env.id, a.id);
 	};
 	return (
-		<Collapsible open={!folded} onOpenChange={() => s.toggleFold(a.id)}>
+		<Collapsible open={!folded} onOpenChange={() => s.toggleFold(env.id, a.id)}>
 			<SidebarMenu>
-				<SidebarMenuItem className="app-no-drag" title={`${a.id}: ${a.description || "no description"}\n${a.model} · ${a.mode}`} onContextMenu={(e) => (e.preventDefault(), void menu())}>
+				<SidebarMenuItem className="app-no-drag" title={`${a.id}${s.on(env.id)}: ${a.description || "no description"}\n${a.model} · ${a.mode}`} onContextMenu={(e) => (e.preventDefault(), void menu())}>
 					{/* What folds the group is the agent's line but its buttons. Under the pointer the line makes room for all three. */}
 					<CollapsibleTrigger render={<SidebarMenuButton className="group-hover/menu-item:pr-20" />}>
 						{folded ? <ChevronRightIcon className="text-faint" /> : <ChevronDownIcon className="text-faint" />}
@@ -244,25 +273,59 @@ function AgentGroup({ a }: { a: AgentInfo }) {
 						</span>
 						{waits ? <Badge variant="destructive" className="size-4 p-0">!</Badge> : working ? <Spinner aria-label="Working" className="size-3" /> : unread && folded ? <Badge className="size-2 p-0" /> : null}
 					</CollapsibleTrigger>
-					<Tooltip><TooltipTrigger render={<SidebarMenuAction className="right-13 hidden group-hover/menu-item:flex" onClick={() => s.openSettings("agents", a.id)} aria-label={`Settings of ${a.id}`} />}><SettingsIcon /></TooltipTrigger><TooltipContent>{`Settings of ${a.id}`}</TooltipContent></Tooltip>
+					<Tooltip><TooltipTrigger render={<SidebarMenuAction className="right-13 hidden group-hover/menu-item:flex" onClick={() => s.openSettings("agents", a.id, env.id)} aria-label={`Settings of ${a.id}`} />}><SettingsIcon /></TooltipTrigger><TooltipContent>{`Settings of ${a.id}`}</TooltipContent></Tooltip>
 					<Tooltip><TooltipTrigger render={<SidebarMenuAction className="right-7 hidden group-hover/menu-item:flex" onClick={() => void pickFolder()} aria-label={`Open a folder for a conversation with ${a.id}`} />}><FolderIcon /></TooltipTrigger><TooltipContent>{`Open a folder for a conversation with ${a.id}`}</TooltipContent></Tooltip>
-					<Tooltip><TooltipTrigger render={<SidebarMenuAction onClick={() => void s.newConversation(a.id)} aria-label={`New conversation with ${a.id}`} />}><PlusIcon /></TooltipTrigger><TooltipContent>{`New conversation with ${a.id}`}</TooltipContent></Tooltip>
+					<Tooltip><TooltipTrigger render={<SidebarMenuAction onClick={() => void s.newConversation(who)} aria-label={`New conversation with ${a.id}`} />}><PlusIcon /></TooltipTrigger><TooltipContent>{`New conversation with ${a.id}`}</TooltipContent></Tooltip>
 				</SidebarMenuItem>
 			</SidebarMenu>
 			<CollapsibleContent>
-				<Listbox aria-label={`Conversations with ${a.id}`} className="outline-none" {...LISTBOX} value={s.active?.kind === "chat" && s.active.agent === a.id ? s.active.session : null} onValueChange={onPick((session) => void s.openTab(a.id, session))} render={<SidebarMenu />}>
-					{threaded(rows).map(({ c, depth }) => <ConversationRow key={c.session} agent={a.id} c={c} depth={depth} />)}
+				<Listbox aria-label={`Conversations with ${a.id}`} className="outline-none" {...LISTBOX} value={s.active?.kind === "chat" && s.active.env === env.id && s.active.agent === a.id ? s.active.session : null} onValueChange={onPick((session) => void s.openTab(env.id, a.id, session))} render={<SidebarMenu />}>
+					{threaded(rows).map(({ c, depth }) => <ConversationRow key={c.session} env={env.id} agent={a.id} c={c} depth={depth} />)}
 				</Listbox>
 			</CollapsibleContent>
 		</Collapsible>
 	);
 }
 
+/** One environment in the side bar: its name and how its pine is, then its agents. */
+function EnvSection({ env }: { env: Env }) {
+	const s = store;
+	const state = env.service;
+	const status = state.status === "error" ? "error" : state.status === "starting" ? "connecting" : !env.connected ? "reconnecting" : "connected";
+	const about = env.id === "local" ? "Agents of the pine on this computer" : `Agents of the pine on ${env.host}, over SSH`;
+	const how = state.status === "ready" ? `pine${state.version ? ` ${state.version}` : ""} · ${state.remote ? state.mode : state.started ? "started here" : "attached"}` : "";
+	// How its pine is, under its name, while it is not simply there.
+	const note = (words: string, busy: boolean, bad = false) => (
+		<div data-slot="environment-note" className={cn("flex min-h-7 items-center gap-2 px-2 text-xs app-no-drag", bad ? "text-destructive" : "text-muted-foreground")} title={state.status === "error" ? state.message : undefined}>
+			{busy ? <Spinner className="size-3" /> : null}
+			<span className="min-w-0 flex-1 truncate">{words}</span>
+			{bad ? <Button variant="outline" size="xs" onClick={() => void bridge.retry(env.id)}>Try again</Button> : null}
+		</div>
+	);
+	return (
+		<SidebarGroup data-environment={env.id} data-status={status}>
+			<SidebarGroupLabel title={`${about}${how ? `\n${how}` : ""} · ${status}`}>
+				{env.id === "local" ? <CpuIcon /> : <TerminalIcon />}
+				<span data-slot="environment-label" className="min-w-0 truncate">{env.label}</span>
+				{status === "connected" ? null : <span className={cn(DOT, status === "error" ? "bg-destructive" : "bg-warn")} />}
+			</SidebarGroupLabel>
+			{env.ready ? <Tooltip><TooltipTrigger render={<SidebarGroupAction className="app-no-drag" onClick={() => s.openSettings("agents", "+", env.id)} aria-label={`New agent${s.on(env.id)}`} />}><PlusIcon /></TooltipTrigger><TooltipContent>{`New agent${s.on(env.id)}`}</TooltipContent></Tooltip> : null}
+			<SidebarGroupContent className="flex flex-col gap-1">
+				{state.status === "error" ? note(state.kind === "ssh" ? "Not reached over SSH" : state.kind === "no-home" ? "No pine home yet" : "Did not start", false, true) : status === "connecting" ? note(env.host ? "Connecting over SSH…" : "Starting pine…", true) : status === "reconnecting" ? note("Reconnecting…", true) : null}
+				{env.agents.map((a) => <AgentGroup key={a.id} env={env} a={a} />)}
+			</SidebarGroupContent>
+		</SidebarGroup>
+	);
+}
+
 function Sidebar() {
 	const s = useModel(store);
-	const ready = s.service.status === "ready";
 	const front = s.active;
 	const newer = s.update?.status === "newer" ? s.update : undefined;
+	const envs = s.shown;
+	const one = envs.length === 1 ? envs[0] : undefined;
+	const state = one?.service;
+	const up = envs.filter((e) => e.ready && e.connected).length;
 	// shadcn's stock Sidebar, fixed in its place (the panel around it sets its width). Its background
 	// is left to the window behind it, which is the system's material on a Mac.
 	// Where nothing is to click, the side bar moves the window, like the bar along the top.
@@ -280,11 +343,7 @@ function Sidebar() {
 							</SidebarMenuItem>
 						</SidebarMenu>
 					</SidebarGroup>
-					<SidebarGroup>
-						<SidebarGroupLabel>Agents</SidebarGroupLabel>
-						<Tooltip><TooltipTrigger render={<SidebarGroupAction className="app-no-drag" onClick={() => s.openSettings("agents", "+")} aria-label="New agent" />}><PlusIcon /></TooltipTrigger><TooltipContent>New agent</TooltipContent></Tooltip>
-						<SidebarGroupContent className="flex flex-col gap-1">{s.agents.map((a) => <AgentGroup key={a.id} a={a} />)}</SidebarGroupContent>
-					</SidebarGroup>
+					{envs.map((env) => <EnvSection key={env.id} env={env} />)}
 				</ScrollArea>
 			</SidebarContent>
 			<SidebarFooter className="gap-0">
@@ -301,11 +360,19 @@ function Sidebar() {
 						<SidebarMenuButton isActive={front?.kind === "settings"} onClick={() => s.openSettings()}><SettingsIcon /><span className="grow min-w-0 flex-1">Settings</span><Kbd>⌘,</Kbd></SidebarMenuButton>
 					</SidebarMenuItem>
 				</SidebarMenu>
-				<div data-slot="service-status" className="flex items-center gap-2 px-2 pt-1.5 pb-0.5 text-xs text-faint app-no-drag" title={s.service.status === "ready" ? `${s.service.home} · ${s.service.started ? "started by this app" : "a pine that was already running"}` : ""}>
-					{/* The dot stands in the place of the icons in the rows above it: its middle under theirs, and what is written beside it under their names. */}
-					<span className="grid size-4 flex-none place-items-center"><span className={cn(DOT, !ready ? "bg-warn" : s.connected ? "bg-primary" : "bg-destructive")} /></span>
-					<span className="truncate">{!ready ? "starting" : !s.connected ? "pine does not answer" : `pine${s.service.status === "ready" && s.service.version ? ` ${s.service.version}` : ""} · ${s.service.status === "ready" && s.service.started ? "started here" : "attached"}`}</span>
-				</div>
+				{one ? (
+					<div data-slot="service-status" className="flex items-center gap-2 px-2 pt-1.5 pb-0.5 text-xs text-faint app-no-drag" title={state?.status === "ready" ? `${state.home} · ${state.remote ? `over SSH (${state.from})` : state.started ? "started by this app" : "a pine that was already running"}` : ""}>
+						{/* The dot stands in the place of the icons in the rows above it: its middle under theirs, and what is written beside it under their names. */}
+						<span className="grid size-4 flex-none place-items-center"><span className={cn(DOT, state?.status !== "ready" ? "bg-warn" : one.connected ? "bg-primary" : "bg-destructive")} /></span>
+						<span className="truncate">{state?.status !== "ready" ? "starting" : !one.connected ? "pine does not answer" : `pine${state.version ? ` ${state.version}` : ""} · ${state.remote ? state.mode : state.started ? "started here" : "attached"}`}</span>
+					</div>
+				) : (
+					// Each environment says beside its name when its pine does not answer.
+					<button type="button" data-slot="service-status" className="flex items-center gap-2 px-2 pt-1.5 pb-0.5 text-left text-xs text-faint app-no-drag hover:text-foreground" onClick={() => s.openSettings("environments")}>
+						<span className="grid size-4 flex-none place-items-center"><span className={cn(DOT, up === envs.length ? "bg-primary" : up ? "bg-warn" : "bg-destructive")} /></span>
+						<span className="truncate">{up} of {envs.length} environments connected</span>
+					</button>
+				)}
 			</SidebarFooter>
 		</SidebarRoot>
 	);
@@ -318,7 +385,9 @@ function TabButton({ tab, index }: { tab: Tab; index: number }) {
 	const s = store;
 	const [drop, setDrop] = useState(false);
 	const on = s.active === tab;
-	const kept = tab.kind === "chat" && (tab.session === "main" || s.pins.has(tab.key));
+	const kept = tab.kind === "chat" && (tab.session === "main" || s.isPinned(tab));
+	// Where several environments are shown, a tab of another machine says which: both can have a "main".
+	const where = tab.env !== "local" && s.shown.length > 1 ? s.env(tab.env)?.label : undefined;
 	// The tab brought to the front is scrolled into view when there are more tabs than the row shows.
 	const ref = useRef<HTMLDivElement>(null);
 	useEffect(() => {
@@ -339,13 +408,14 @@ function TabButton({ tab, index }: { tab: Tab; index: number }) {
 			onDrop={(e) => (setDrop(false), s.moveTab(Number(e.dataTransfer.getData("application/x-pine-tab")), index))}
 			onClick={() => s.activate(tab)}
 			onAuxClick={(e) => e.button === 1 && s.closeTab(tab)}
-			title={tab.kind === "chat" ? `${tab.agent} · ${tab.session}${tab.folder ? ` · ${tab.folder}` : ""}` : tab.kind === "task" ? `task #${tab.task}` : tab.kind}
+			title={tab.kind === "chat" ? `${tab.agent}${s.on(tab.env)} · ${tab.session}${tab.folder ? ` · ${tab.folder}` : ""}` : tab.kind === "task" ? `task #${tab.task}${s.on(tab.env)}` : tab.kind === "events" ? `events${s.on(tab.env)}` : tab.kind}
 		>
 			<span className="grid min-w-3.5 flex-none place-items-center">
 				{tab.approvals.size ? <Badge variant="destructive" className="size-4 p-0">!</Badge> : tab.busy ? <Spinner aria-label="Working" className="size-3" /> : tab.unread ? <Badge className="size-2 p-0" /> : tab.kind === "events" ? <AudioLinesIcon size={12} /> : tab.kind === "settings" ? <SettingsIcon size={12} /> : tab.kind === "task" ? <ListIcon size={12} /> : <Avatar size="sm"><AvatarFallback>{tab.agent.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar>}
 			</span>
 			<span data-slot="tab-name" className="truncate">
-				{tab.kind === "events" ? "Events" : tab.kind === "settings" ? "Settings" : tab.kind === "task" ? <><b className="font-medium">{tab.agent}</b> #{tab.task}</> : tab.session === "main" ? <b className="font-medium">{tab.agent}</b> : <><b className="font-medium">{tab.agent}</b> · {s.titleOf(tab.agent, tab.session)}</>}
+				{tab.kind === "events" ? "Events" : tab.kind === "settings" ? "Settings" : tab.kind === "task" ? <><b className="font-medium">{tab.agent}</b> #{tab.task}</> : tab.session === "main" ? <b className="font-medium">{tab.agent}</b> : <><b className="font-medium">{tab.agent}</b> · {s.titleOf(tab.env, tab.agent, tab.session)}</>}
+				{where ? <span data-slot="tab-where" className="text-faint"> · {where}</span> : null}
 			</span>
 			{kept && tab.session !== "main" ? <StarIcon size={10} className="flex-none text-warn" /> : null}
 			<Button variant="ghost" size="icon-xs" aria-label="Close this tab" className={cn(!on && "opacity-0 group-hover/tab:opacity-100")} onClick={(e) => (e.stopPropagation(), s.closeTab(tab))}><XIcon /></Button>
@@ -367,7 +437,7 @@ function TitleBar() {
 					{s.tabs.map((t, i) => <TabButton key={t.id} tab={t} index={i} />)}
 				</div>
 			</ScrollArea>
-			<Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon" className="app-no-drag" onClick={() => void s.newConversation()} aria-label={with_ ? `New conversation with ${with_}` : "New conversation: you are asked with which agent"} />}><PlusIcon /></TooltipTrigger><TooltipContent>{with_ ? `New conversation with ${with_}` : "New conversation: you are asked with which agent"}<Kbd>⌘T</Kbd></TooltipContent></Tooltip>
+			<Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon" className="app-no-drag" onClick={() => void s.newConversation()} aria-label={with_ ? `New conversation with ${with_.agent}${s.on(with_.env)}` : "New conversation: you are asked with which agent"} />}><PlusIcon /></TooltipTrigger><TooltipContent>{with_ ? `New conversation with ${with_.agent}${s.on(with_.env)}` : "New conversation: you are asked with which agent"}<Kbd>⌘T</Kbd></TooltipContent></Tooltip>
 			<span className="min-w-0 flex-1" />
 		</header>
 	);
@@ -377,10 +447,10 @@ function TitleBar() {
 
 function Asking() {
 	const s = useModel(store);
-	if (!s.asking) return null;
-	const req = s.tabs.map((t) => t.approvals.get(s.asking!)).find(Boolean)?.req;
-	if (!req) return null;
-	return req.tool === "question" ? <QuestionDialog key={req.id} req={req} /> : <ApprovalDialog key={req.id} req={req} />;
+	const open = s.asked_;
+	if (!open) return null;
+	const { env, req } = open;
+	return req.tool === "question" ? <QuestionDialog key={s.asking} env={env} req={req} /> : <ApprovalDialog key={s.asking} env={env} req={req} />;
 }
 
 function Help({ close }: { close: () => void }) {
@@ -505,7 +575,7 @@ export function App() {
 		window.addEventListener("drop", stop);
 		return () => (window.removeEventListener("dragover", stop), window.removeEventListener("drop", stop));
 	}, []);
-	const ready = s.service.status === "ready" && s.agents.length > 0 && s.active;
+	const ready = s.ready && s.active;
 	const tab = s.active;
 	const side = usePanelRef();
 	// The window itself: what shows between and around the panels. On a Mac the system's material lies behind it.
